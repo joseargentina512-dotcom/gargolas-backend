@@ -15,13 +15,18 @@ const {
 /* ===============================
    LOGIN → REDIRECCIONA A KICK
 ================================ */
-app.get("/auth/kick", (req, res) => {
-  const redirect = `https://kick.com/oauth2/authorize?response_type=code&client_id=${KICK_CLIENT_ID}&redirect_uri=${encodeURIComponent(
-    FRONTEND_URL + "/callback.html"
-  )}&scope=user:read`;
 
-  res.redirect(redirect);
+app.get("/auth/kick/callback", async (req, res) => {
+  const code = req.query.code;
+
+  if (!code) {
+    return res.send("Error: no code recibido");
+  }
+
+  // (más adelante acá intercambiamos el code por el token)
+  res.send("Kick autenticado correctamente ✅");
 });
+
 
 /* ===============================
    CALLBACK → INTERCAMBIA TOKEN
