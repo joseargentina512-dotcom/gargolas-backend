@@ -1,5 +1,5 @@
 {
-  "name": "gargolas-backend",
+  "name": "kick-auth-backend",
   "version": "1.0.0",
   "type": "module",
   "main": "index.js",
