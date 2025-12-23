@@ -6,42 +6,39 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+/* 🔎 RUTA TEST */
+app.get("/", (req, res) => {
+  res.send("✅ Backend Gargolas funcionando");
+});
+
 const {
   KICK_CLIENT_ID,
   KICK_CLIENT_SECRET,
   FRONTEND_URL
 } = process.env;
 
-/* ===============================
-   1️⃣ LOGIN → REDIRIGE A KICK
-================================ */
+/* LOGIN */
 app.get("/auth/kick", (req, res) => {
-  const redirectUrl =
+  const url =
     "https://kick.com/oauth2/authorize" +
     "?response_type=code" +
     `&client_id=${KICK_CLIENT_ID}` +
     `&redirect_uri=${FRONTEND_URL}/callback.html` +
     "&scope=user:read";
 
-  res.redirect(redirectUrl);
+  res.redirect(url);
 });
 
-/* ===============================
-   2️⃣ CALLBACK → INTERCAMBIA TOKEN
-================================ */
+/* CALLBACK */
 app.get("/auth/kick/callback", async (req, res) => {
   const { code } = req.query;
 
-  if (!code) {
-    return res.status(400).send("❌ No se recibió el code de Kick");
-  }
+  if (!code) return res.send("❌ No code");
 
   try {
-    const tokenRes = await fetch("https://kick.com/oauth2/token", {
+    const r = await fetch("https://kick.com/oauth2/token", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         grant_type: "authorization_code",
         client_id: KICK_CLIENT_ID,
@@ -51,28 +48,19 @@ app.get("/auth/kick/callback", async (req, res) => {
       })
     });
 
-    const tokenData = await tokenRes.json();
+    const data = await r.json();
 
-    if (!tokenData.access_token) {
-      console.error(tokenData);
-      return res.status(500).send("❌ Error obteniendo token");
-    }
-
-    // Redirige al frontend con el token
     res.redirect(
-      `${FRONTEND_URL}/callback.html?access_token=${tokenData.access_token}`
+      `${FRONTEND_URL}/callback.html?access_token=${data.access_token}`
     );
 
-  } catch (err) {
-    console.error(err);
-    res.status(500).send("❌ Error OAuth Kick");
+  } catch (e) {
+    console.error(e);
+    res.send("❌ Error OAuth");
   }
 });
 
-/* ===============================
-   SERVER
-================================ */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () =>
-  console.log(`🔥 Backend Kick activo en puerto ${PORT}`)
+  console.log("🔥 Backend Kick activo en puerto " + PORT)
 );
