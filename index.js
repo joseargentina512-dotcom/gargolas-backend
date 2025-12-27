@@ -18,54 +18,47 @@ const {
 
 const REDIRECT_URI = "https://gargolas-backend.onrender.com/auth/kick/callback";
 const KICK_CHANNEL = "maurooakd";
-const POINTS_INTERVAL = 30 * 60 * 1000; // 30 minutos
+const POINTS_INTERVAL = 30 * 60 * 1000;
 const POINTS_AMOUNT = 50;
 
 /* ============= FIREBASE ADMIN ============= */
 if (!admin.apps.length) {
   admin.initializeApp({
-    credential: admin.credential.cert(
-      JSON.parse(FIREBASE_SERVICE_ACCOUNT)
-    )
+    credential: admin.credential.cert(JSON.parse(FIREBASE_SERVICE_ACCOUNT))
   });
 }
 
 const db = admin.firestore();
-
-/* ============= TRACKER DE PUNTOS ============= */
 const viewersMap = new Map();
 const WATCHTIME_SAVE_INTERVAL = 5 * 60 * 1000;
 
-/* ============= FIRESTORE SESSIONS (PERSISTENTE) ============= */
+/* ============= FIRESTORE SESSIONS ============= */
 async function saveSession(state, verifier) {
   try {
     await db.collection('oauth_sessions').doc(state).set({
       verifier,
       createdAt: new Date(),
-      expiresAt: new Date(Date.now() + 10 * 60 * 1000) // 10 min
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000)
     });
-    console.log("💾 Session guardada en Firestore:", state.substring(0, 8));
+    console.log("💾 Session guardada:", state.substring(0, 8));
   } catch (error) {
-    console.error('❌ Error saving session:', error);
+    console.error('❌ Error saveSession:', error);
   }
 }
 
 async function getSession(state) {
   try {
-    const now = new Date();
     const doc = await db.collection('oauth_sessions').doc(state).get();
-    
     if (!doc.exists) return null;
     
     const data = doc.data();
-    if (now > data.expiresAt) {
+    if (new Date() > data.expiresAt) {
       await db.collection('oauth_sessions').doc(state).delete();
       return null;
     }
-    
     return data.verifier;
   } catch (error) {
-    console.error('❌ Error getting session:', error);
+    console.error('❌ Error getSession:', error);
     return null;
   }
 }
@@ -73,154 +66,79 @@ async function getSession(state) {
 async function deleteSession(state) {
   try {
     await db.collection('oauth_sessions').doc(state).delete();
-    console.log("🧹 Session eliminada:", state.substring(0, 8));
   } catch (error) {
-    console.error('❌ Error deleting session:', error);
+    console.error('❌ Error deleteSession:', error);
   }
 }
 
-/* ============= GUARDAR WATCHTIME CADA 5 MIN ============= */
+/* ============= FUNCIONES PRINCIPALES ============= */
 async function saveWatchtime() {
-  try {
-    if (viewersMap.size === 0) {
-      console.log('⏱️ No hay usuarios viendo, nada que guardar');
-      return;
-    }
-
-    const batch = db.batch();
-    let saved = 0;
-
-    for (const [username, data] of viewersMap.entries()) {
-      const watchTimeSeconds = Math.floor((Date.now() - data.startTime) / 1000);
-      const userRef = db.collection('watchtime').doc(username);
-      
-      batch.set(userRef, {
-        username,
-        watchTimeSeconds: admin.firestore.FieldValue.increment(watchTimeSeconds),
-        totalWatchTime: admin.firestore.FieldValue.increment(watchTimeSeconds),
-        lastUpdated: new Date(),
-        sessions: admin.firestore.FieldValue.increment(1)
-      }, { merge: true });
-
-      saved++;
-    }
-
-    await batch.commit();
-    console.log(`💾 Watchtime guardado para ${saved} usuarios`);
-
-  } catch (error) {
-    console.error('❌ Error guardando watchtime:', error.message);
+  if (viewersMap.size === 0) return;
+  const batch = db.batch();
+  let saved = 0;
+  for (const [username, data] of viewersMap) {
+    const watchTimeSeconds = Math.floor((Date.now() - data.startTime) / 1000);
+    batch.set(db.collection('watchtime').doc(username), {
+      username,
+      watchTimeSeconds: admin.firestore.FieldValue.increment(watchTimeSeconds),
+      totalWatchTime: admin.firestore.FieldValue.increment(watchTimeSeconds),
+      lastUpdated: new Date()
+    }, { merge: true });
+    saved++;
   }
+  await batch.commit();
+  console.log(`💾 Watchtime: ${saved} usuarios`);
 }
 
-/* ============= VERIFICAR SI STREAM ESTÁ LIVE ============= */
 async function isStreamLive() {
   try {
-    const response = await fetch(
-      `https://kick.com/api/v2/channels/${KICK_CHANNEL}`,
-      {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'application/json',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Referer': 'https://kick.com/'
-        },
-        timeout: 5000
+    const response = await fetch(`https://kick.com/api/v2/channels/${KICK_CHANNEL}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       }
-    );
-
-    if (!response.ok) {
-      console.error(`⚠️ Error Kick API: ${response.status}`);
-      return false;
-    }
-
+    });
     const data = await response.json();
-    const isLive = data?.livestream?.is_live || false;
-    console.log(`📺 Stream ${KICK_CHANNEL}: ${isLive ? '🟢 LIVE' : '⚫ OFFLINE'}`);
-    return isLive;
+    return data?.livestream?.is_live || false;
   } catch (error) {
-    console.error('⚠️ Error verificando stream:', error.message);
     return false;
   }
 }
 
-/* ============= OTORGAR PUNTOS CADA 30 MIN ============= */
 async function awardPoints() {
-  try {
-    if (viewersMap.size === 0) {
-      console.log('⚠️ No hay usuarios viendo el stream');
-      return;
-    }
-
-    const streamLive = await isStreamLive();
-    if (!streamLive) {
-      console.log('⚠️ Stream no está live, no se otorgan puntos');
-      return;
-    }
-
-    const batch = db.batch();
-    let updated = 0;
-
-    for (const [username] of viewersMap.entries()) {
-      const userRef = db.collection('users').doc(username);
-      
-      batch.set(userRef, {
-        points: admin.firestore.FieldValue.increment(POINTS_AMOUNT),
-        watching: true,
-        lastPointsUpdate: new Date(),
-        totalPointsEarned: admin.firestore.FieldValue.increment(POINTS_AMOUNT)
-      }, { merge: true });
-
-      updated++;
-      console.log(`✅ ${username} + ${POINTS_AMOUNT} puntos`);
-    }
-
-    await batch.commit();
-    console.log(`\n🎯 ${updated} usuarios recibieron ${POINTS_AMOUNT} puntos\n`);
-
-    await db.collection('pointsLog').add({
-      timestamp: new Date(),
-      channel: KICK_CHANNEL,
-      usersRewarded: updated,
-      pointsPerUser: POINTS_AMOUNT,
-      totalPointsDistributed: updated * POINTS_AMOUNT
-    });
-
-  } catch (error) {
-    console.error('❌ Error otorgando puntos:', error.message);
+  if (viewersMap.size === 0) return;
+  const streamLive = await isStreamLive();
+  if (!streamLive) return;
+  
+  const batch = db.batch();
+  for (const [username] of viewersMap) {
+    batch.set(db.collection('users').doc(username), {
+      points: admin.firestore.FieldValue.increment(POINTS_AMOUNT),
+      watching: true,
+      lastPointsUpdate: new Date()
+    }, { merge: true });
   }
+  await batch.commit();
+  console.log(`🎯 ${viewersMap.size} usuarios +${POINTS_AMOUNT} pts`);
 }
 
-/* ============= LIMPIAR USUARIOS INACTIVOS ============= */
 async function cleanupInactiveViewers() {
-  try {
-    const now = Date.now();
-    const timeout = 5 * 60 * 1000;
-
-    for (const [username, data] of viewersMap.entries()) {
-      if (now - data.lastActivity > timeout) {
-        viewersMap.delete(username);
-        console.log(`🚪 ${username} removido por inactividad`);
-      }
+  const now = Date.now();
+  for (const [username, data] of viewersMap) {
+    if (now - data.lastActivity > 5 * 60 * 1000) {
+      viewersMap.delete(username);
     }
-  } catch (error) {
-    console.error('❌ Error limpiando usuarios:', error.message);
   }
 }
 
-/* ============= LOGIN KICK - FIRESTORE SESSIONS ============= */
+/* ============= RUTAS OAUTH ============= */
 app.get("/auth/kick", async (req, res) => {
   try {
     const state = crypto.randomBytes(16).toString("hex");
     const verifier = crypto.randomBytes(32).toString("hex");
-    const challenge = crypto
-      .createHash("sha256")
-      .update(verifier)
-      .digest("base64url");
+    const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
     
-    // 🔥 FIRESTORE SESSION PERSISTENTE
     await saveSession(state, verifier);
-
+    
     const params = new URLSearchParams({
       client_id: KICK_CLIENT_ID,
       redirect_uri: REDIRECT_URI,
@@ -230,45 +148,27 @@ app.get("/auth/kick", async (req, res) => {
       code_challenge: challenge,
       code_challenge_method: "S256"
     });
-
-    const url = `https://id.kick.com/oauth/authorize?${params.toString()}`;
     
-    console.log("🔗 Redirigiendo a Kick OAuth...");
-    res.redirect(url);
+    res.redirect(`https://id.kick.com/oauth/authorize?${params}`);
   } catch (error) {
-    console.error("❌ Error en /auth/kick:", error);
     res.redirect(`${FRONTEND_URL}?error=auth_error`);
   }
 });
 
-/* ============= CALLBACK - FIRESTORE SESSIONS ============= */
 app.get("/auth/kick/callback", async (req, res) => {
-  const { code, state, error } = req.query;
-
-  console.log("🔍 Callback recibido:", { code: !!code, state, error });
-
-  if (error) {
-    console.error(`❌ Error de Kick: ${error}`);
-    return res.redirect(`${FRONTEND_URL}?error=kick_denied`);
+  const { code, state, error: oauthError } = req.query;
+  
+  if (oauthError || !code || !state) {
+    return res.redirect(`${FRONTEND_URL}?error=invalid_auth`);
   }
 
-  if (!code) {
-    console.error("❌ No hay código de autorización");
-    return res.redirect(`${FRONTEND_URL}?error=no_code`);
-  }
-
-  // 🔥 FIRESTORE SESSION CHECK
   const verifier = await getSession(state);
   if (!verifier) {
-    console.error("❌ Session no encontrada en Firestore:", state);
     return res.redirect(`${FRONTEND_URL}?error=invalid_state`);
   }
 
-  console.log("✅ Session válida encontrada en Firestore");
-
   try {
-    console.log("🔄 Intercambiando código por token...");
-
+    // TOKEN EXCHANGE
     const tokenRes = await fetch("https://id.kick.com/oauth/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -279,235 +179,91 @@ app.get("/auth/kick/callback", async (req, res) => {
         code,
         redirect_uri: REDIRECT_URI,
         code_verifier: verifier
-      }).toString()
+      })
     });
-
-    if (!tokenRes.ok) {
-      const errorData = await tokenRes.text();
-      console.error("❌ Error obteniendo token:", tokenRes.status, errorData);
-      await deleteSession(state);
-      return res.redirect(`${FRONTEND_URL}?error=token_error`);
-    }
-
-    const tokenData = await tokenRes.json();
-    console.log("✅ Token obtenido:", tokenData.access_token.substring(0, 20) + "...");
-
-    const userRes = await fetch("https://api.kick.com/public/v1/users", {
-      method: "GET",
-      headers: {
-        "Authorization": `Bearer ${tokenData.access_token}`,
-        "Content-Type": "application/json"
-      }
-    });
-
-    if (!userRes.ok) {
-      const errorData = await userRes.text();
-      console.error("❌ Error obteniendo usuario:", userRes.status, errorData);
-      await deleteSession(state);
-      return res.redirect(`${FRONTEND_URL}?error=user_error`);
-    }
-
-    const kickUserData = await userRes.json();
-    console.log("🔍 Usuario raw:", JSON.stringify(kickUserData));
     
-    const kickUser = kickUserData.data?.[0] || kickUserData;
-    const kickId = kickUser.id || kickUser.kickId || 'unknown_id_' + Date.now();
-    const username = kickUser.username || kickUser.nickname || `kick_user_${kickId}`;
-    const avatar = kickUser.profile_pic_url || kickUser.profile_pic || '';
-
-    console.log("✅ Usuario procesado:", { username, kickId, avatar });
-
-    const firebaseToken = await admin.auth().createCustomToken(
-      `kick_${kickId}`,
-      {
-        username,
-        provider: "kick"
-      }
-    );
-
-    console.log("✅ Token Firebase creado");
-
+    const tokenData = await tokenRes.json();
+    
+    // GET USER
+    const userRes = await fetch("https://api.kick.com/public/v1/users", {
+      headers: { "Authorization": `Bearer ${tokenData.access_token}` }
+    });
+    
+    const userData = await userRes.json();
+    const user = userData.data?.[0] || userData;
+    const username = user.username || `kick_${user.id || Date.now()}`;
+    
+    // FIREBASE TOKEN
+    const firebaseToken = await admin.auth().createCustomToken(`kick_${user.id || 'unknown'}`, {
+      username,
+      provider: "kick"
+    });
+    
+    // SAVE USER
     await db.collection('users').doc(username).set({
-      kickId: kickId,
-      username: username,
-      avatar: avatar,
-      loginAt: new Date(),
-      points: 0,
-      totalPointsEarned: 0
+      kickId: user.id || 'unknown',
+      username,
+      avatar: user.profile_pic_url || '',
+      points: 0
     }, { merge: true });
-
-    // 🔥 LIMPIAR FIRESTORE SESSION
+    
     await deleteSession(state);
-    console.log("🧹 Session Firestore limpiada");
-
     res.redirect(`${FRONTEND_URL}?token=${firebaseToken}`);
-
+    
   } catch (error) {
-    console.error("❌ Error en callback:", error.message);
     await deleteSession(state);
     res.redirect(`${FRONTEND_URL}?error=server_error`);
   }
 });
 
-/* ============= RUTAS TRACKER ============= */
+/* ============= RUTAS API ============= */
 app.post("/api/start-watching", async (req, res) => {
-  try {
-    const { username } = req.body;
-    
-    if (!username) {
-      return res.status(400).json({ error: "Username requerido" });
-    }
-
-    const streamLive = await isStreamLive();
-    
-    if (!streamLive) {
-      return res.status(400).json({ 
-        error: "El stream no está live en este momento",
-        isLive: false
-      });
-    }
-
-    viewersMap.set(username, {
-      startTime: Date.now(),
-      lastActivity: Date.now(),
-      sessionId: Math.random().toString(36)
-    });
-
-    console.log(`👀 ${username} comenzó a ver (Total: ${viewersMap.size})`);
-
-    res.json({
-      success: true,
-      message: `${username} está viendo a ${KICK_CHANNEL}`,
-      totalViewers: viewersMap.size,
-      nextRewardIn: Math.ceil(POINTS_INTERVAL / 1000 / 60) + " minutos"
-    });
-
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  const { username } = req.body;
+  viewersMap.set(username, { startTime: Date.now(), lastActivity: Date.now() });
+  res.json({ success: true, totalViewers: viewersMap.size });
 });
 
 app.post("/api/stop-watching", (req, res) => {
-  try {
-    const { username } = req.body;
-
-    if (!username) {
-      return res.status(400).json({ error: "Username requerido" });
-    }
-
-    const wasViewing = viewersMap.has(username);
-    viewersMap.delete(username);
-
-    if (wasViewing) {
-      console.log(`👋 ${username} dejó de ver (Total: ${viewersMap.size})`);
-    }
-
-    res.json({
-      success: true,
-      message: `${username} dejó de ver`,
-      totalViewers: viewersMap.size
-    });
-
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  const { username } = req.body;
+  viewersMap.delete(username);
+  res.json({ success: true });
 });
 
 app.post("/api/user-activity", (req, res) => {
   const { username } = req.body;
-
   if (viewersMap.has(username)) {
     viewersMap.get(username).lastActivity = Date.now();
-    res.json({ success: true, message: "Actividad registrada" });
-  } else {
-    res.status(404).json({ error: "Usuario no está viendo" });
   }
+  res.json({ success: true });
 });
 
 app.get("/api/status", async (req, res) => {
-  const isLive = await isStreamLive();
   res.json({
-    status: "running",
-    streamLive: isLive,
-    activeViewers: viewersMap.size,
-    pointsRewardInterval: Math.ceil(POINTS_INTERVAL / 1000 / 60) + " minutos",
-    pointsPerInterval: POINTS_AMOUNT,
-    viewersList: Array.from(viewersMap.keys())
+    status: "ok",
+    viewers: viewersMap.size,
+    streamLive: await isStreamLive()
   });
 });
 
 app.get("/api/top-watchtime", async (req, res) => {
-  try {
-    const snapshot = await db
-      .collection("watchtime")
-      .orderBy("totalWatchTime", "desc")
-      .limit(10)
-      .get();
-
-    const topWatchtime = snapshot.docs.map((doc, idx) => ({
-      position: idx + 1,
-      username: doc.data().username,
-      watchTimeSeconds: doc.data().totalWatchTime || 0,
-      watchTimeHours: Math.floor((doc.data().totalWatchTime || 0) / 3600),
-      watchTimeMinutes: Math.floor(((doc.data().totalWatchTime || 0) % 3600) / 60),
-      isWatching: viewersMap.has(doc.data().username)
-    }));
-
-    res.json(topWatchtime);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  const snapshot = await db.collection("watchtime")
+    .orderBy("totalWatchTime", "desc")
+    .limit(10)
+    .get();
+    
+  const data = snapshot.docs.map(doc => ({
+    username: doc.data().username,
+    hours: Math.floor((doc.data().totalWatchTime || 0) / 3600),
+    minutes: Math.floor(((doc.data().totalWatchTime || 0) % 3600) / 60)
+  }));
+  res.json(data);
 });
 
-app.get("/api/leaderboard", async (req, res) => {
-  try {
-    const snapshot = await db
-      .collection("users")
-      .orderBy("points", "desc")
-      .limit(10)
-      .get();
-
-    const leaderboard = snapshot.docs.map(doc => ({
-      username: doc.id,
-      points: doc.data().points || 0,
-      isWatching: viewersMap.has(doc.id)
-    }));
-
-    res.json(leaderboard);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get("/api/user-points/:username", async (req, res) => {
-  try {
-    const { username } = req.params;
-    const userRef = await db.collection("users").doc(username).get();
-
-    if (!userRef.exists) {
-      return res.json({ username, points: 0, watching: false });
-    }
-
-    res.json({
-      username,
-      points: userRef.data().points || 0,
-      watching: viewersMap.has(username),
-      totalEarned: userRef.data().totalPointsEarned || 0
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/* ============= INICIAR PROCESOS ============= */
+/* ============= INTERVALS ============= */
 setInterval(awardPoints, POINTS_INTERVAL);
 setInterval(saveWatchtime, WATCHTIME_SAVE_INTERVAL);
 setInterval(cleanupInactiveViewers, 2 * 60 * 1000);
-setInterval(isStreamLive, 60 * 1000);
 
 app.listen(3000, () => {
-  console.log("\n🚀 Backend OK");
-  console.log(`📺 Tracker de puntos para ${KICK_CHANNEL} activado`);
-  console.log(`⏰ Puntos: ${POINTS_AMOUNT} cada ${POINTS_INTERVAL / 1000 / 60} minutos`);
-  console.log(`🔗 OAuth: https://id.kick.com (Firestore sessions)`);
+  console.log("🚀 Backend Gargolas OK");
 });
