@@ -73,9 +73,8 @@ const db = admin.firestore();
 const sessions = new Map();
 
 /* ============= TRACKER DE PUNTOS ============= */
-// Map de usuarios viendo: { username: { startTime, lastActivity, sessionId, watchTimeSeconds } }
 const viewersMap = new Map();
-const WATCHTIME_SAVE_INTERVAL = 5 * 60 * 1000; // Guardar cada 5 minutos
+const WATCHTIME_SAVE_INTERVAL = 5 * 60 * 1000;
 
 /* ============= VERIFICAR SI STREAM ESTÁ LIVE ============= */
 async function isStreamLive() {
@@ -84,7 +83,10 @@ async function isStreamLive() {
       `https://kick.com/api/v2/channels/${KICK_CHANNEL}`,
       {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'application/json',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Referer': 'https://kick.com/'
         },
         timeout: 5000
       }
@@ -122,7 +124,6 @@ async function awardPoints() {
     const batch = db.batch();
     let updated = 0;
 
-    // Otorgar puntos a cada usuario que esté viendo
     for (const [username] of viewersMap.entries()) {
       const userRef = db.collection('users').doc(username);
       
@@ -140,7 +141,6 @@ async function awardPoints() {
     await batch.commit();
     console.log(`\n🎯 ${updated} usuarios recibieron ${POINTS_AMOUNT} puntos\n`);
 
-    // Registrar en historial
     await db.collection('pointsLog').add({
       timestamp: new Date(),
       channel: KICK_CHANNEL,
@@ -158,7 +158,7 @@ async function awardPoints() {
 async function cleanupInactiveViewers() {
   try {
     const now = Date.now();
-    const timeout = 5 * 60 * 1000; // 5 minutos sin actividad
+    const timeout = 5 * 60 * 1000;
 
     for (const [username, data] of viewersMap.entries()) {
       if (now - data.lastActivity > timeout) {
@@ -203,11 +203,10 @@ app.get("/auth/kick", (req, res) => {
   }
 });
 
-/* ============= CALLBACK - ARREGLADO ============= */
+/* ============= CALLBACK ============= */
 app.get("/auth/kick/callback", async (req, res) => {
   const { code, state, error } = req.query;
 
-  // Verificar errores de Kick
   if (error) {
     console.error(`❌ Error de Kick: ${error}`);
     return res.redirect(`${FRONTEND_URL}?error=kick_denied`);
@@ -222,7 +221,6 @@ app.get("/auth/kick/callback", async (req, res) => {
   try {
     console.log("🔄 Intercambiando código por token...");
 
-    // 1. OBTENER TOKEN
     const tokenRes = await fetch("https://id.kick.com/oauth/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -245,7 +243,6 @@ app.get("/auth/kick/callback", async (req, res) => {
     const tokenData = await tokenRes.json();
     console.log("✅ Token obtenido:", tokenData.access_token.substring(0, 20) + "...");
 
-    // 2. OBTENER INFO DEL USUARIO - ENDPOINT CORRECTO
     const userRes = await fetch("https://api.kick.com/public/v1/users", {
       method: "GET",
       headers: {
@@ -260,34 +257,32 @@ app.get("/auth/kick/callback", async (req, res) => {
       return res.redirect(`${FRONTEND_URL}?error=user_error`);
     }
 
-    const kickUser = await userRes.json();
-    console.log("✅ Usuario obtenido:", kickUser.username);
+    const kickUserData = await userRes.json();
+    const kickUser = kickUserData.data?.[0] || kickUserData;
+    const username = kickUser.username || `kick_${kickUser.id}`;
+    
+    console.log("✅ Usuario obtenido:", username);
 
-    // 3. CREAR TOKEN CUSTOM DE FIREBASE
     const firebaseToken = await admin.auth().createCustomToken(
       `kick_${kickUser.id}`,
       {
-        username: kickUser.username,
+        username: username,
         provider: "kick"
       }
     );
 
     console.log("✅ Token Firebase creado");
 
-    // 4. GUARDAR USUARIO EN FIRESTORE
-    await db.collection('users').doc(kickUser.username).set({
+    await db.collection('users').doc(username).set({
       kickId: kickUser.id,
-      username: kickUser.username,
-      avatar: kickUser.profile_pic,
+      username: username,
+      avatar: kickUser.profile_pic_url || kickUser.profile_pic,
       loginAt: new Date(),
       points: 0,
       totalPointsEarned: 0
     }, { merge: true });
 
-    // Limpiar session
     sessions.delete(state);
-
-    // REDIRIGIR CON TOKEN
     res.redirect(`${FRONTEND_URL}?token=${firebaseToken}`);
 
   } catch (error) {
@@ -297,8 +292,6 @@ app.get("/auth/kick/callback", async (req, res) => {
 });
 
 /* ============= RUTAS TRACKER ============= */
-
-// Usuario comienza a ver el stream
 app.post("/api/start-watching", async (req, res) => {
   try {
     const { username } = req.body;
@@ -316,7 +309,6 @@ app.post("/api/start-watching", async (req, res) => {
       });
     }
 
-    // Agregar usuario a viewers
     viewersMap.set(username, {
       startTime: Date.now(),
       lastActivity: Date.now(),
@@ -337,7 +329,6 @@ app.post("/api/start-watching", async (req, res) => {
   }
 });
 
-// Usuario deja de ver
 app.post("/api/stop-watching", (req, res) => {
   try {
     const { username } = req.body;
@@ -364,7 +355,6 @@ app.post("/api/stop-watching", (req, res) => {
   }
 });
 
-// Registrar actividad (user hace algo = sigue viendo)
 app.post("/api/user-activity", (req, res) => {
   const { username } = req.body;
 
@@ -376,7 +366,6 @@ app.post("/api/user-activity", (req, res) => {
   }
 });
 
-// Estado actual
 app.get("/api/status", async (req, res) => {
   const isLive = await isStreamLive();
   res.json({
@@ -389,7 +378,6 @@ app.get("/api/status", async (req, res) => {
   });
 });
 
-// TOP WATCHTIME - PARA EL HTML
 app.get("/api/top-watchtime", async (req, res) => {
   try {
     const snapshot = await db
@@ -413,30 +401,6 @@ app.get("/api/top-watchtime", async (req, res) => {
   }
 });
 
-// 🌟 DATOS DE PRUEBA - BORRAR DESPUÉS
-app.get('/api/create-test-data', async (req, res) => {
-  const testUsers = [
-    { username: 'MauroAKD', totalWatchTime: 7200 },
-    { username: 'Gargola1', totalWatchTime: 5400 },
-    { username: 'Gargola2', totalWatchTime: 3600 },
-    { username: 'TestUser', totalWatchTime: 1800 }
-  ];
-  
-  const batch = db.batch();
-  testUsers.forEach(user => {
-    const docRef = db.collection('watchtime').doc(user.username);
-    batch.set(docRef, {
-      username: user.username,
-      totalWatchTime: user.totalWatchTime,
-      watchTimeSeconds: user.totalWatchTime
-    });
-  });
-  
-  await batch.commit();
-  res.json({ success: true, message: '✅ Datos de prueba creados!' });
-});
-
-// Leaderboard (Puntos)
 app.get("/api/leaderboard", async (req, res) => {
   try {
     const snapshot = await db
@@ -457,7 +421,6 @@ app.get("/api/leaderboard", async (req, res) => {
   }
 });
 
-// Puntos de un usuario
 app.get("/api/user-points/:username", async (req, res) => {
   try {
     const { username } = req.params;
@@ -479,17 +442,9 @@ app.get("/api/user-points/:username", async (req, res) => {
 });
 
 /* ============= INICIAR PROCESOS ============= */
-
-// Otorgar puntos cada 30 minutos
 setInterval(awardPoints, POINTS_INTERVAL);
-
-// Guardar watchtime cada 5 minutos
 setInterval(saveWatchtime, WATCHTIME_SAVE_INTERVAL);
-
-// Limpiar inactivos cada 2 minutos
 setInterval(cleanupInactiveViewers, 2 * 60 * 1000);
-
-// Verificar stream cada 1 minuto
 setInterval(isStreamLive, 60 * 1000);
 
 app.listen(3000, () => {
