@@ -83,12 +83,26 @@ async function saveWatchtime() {
   }
 }
 
+/* ============= API STATUS CORREGIDO - DETECTA STREAM LIVE ============= */
 async function isStreamLive() {
   try {
     const res = await fetch(`https://kick.com/api/v2/channels/${KICK_CHANNEL}`);
+    if (!res.ok) {
+      console.error('❌ Kick API no OK:', res.status);
+      return false;
+    }
+    
     const data = await res.json();
-    return data?.livestream?.is_live || false;
-  } catch { return false; }
+    const isLive = data.livestream?.is_live === true || 
+                   data.livestream?.live_at !== null ||
+                   data.is_live === true;
+    
+    console.log(`📺 ${KICK_CHANNEL}: Live=${isLive}, ViewersAPI=${data.viewer_count || 'N/A'}`);
+    return isLive;
+  } catch (error) {
+    console.error('❌ Kick API error:', error.message);
+    return false;
+  }
 }
 
 async function awardPoints() {
@@ -222,7 +236,16 @@ app.post("/api/user-activity", (req, res) => {
 });
 
 app.get("/api/status", async (req, res) => {
-  res.json({ status: "running", viewers: viewersMap.size, live: await isStreamLive() });
+  const live = await isStreamLive();
+  console.log(`📊 API/status: Live=${live} | Memoria=${viewersMap.size}`);
+  
+  res.json({ 
+    status: "running", 
+    viewers: viewersMap.size, 
+    live: live,
+    channel: KICK_CHANNEL,
+    timestamp: new Date().toISOString()
+  });
 });
 
 app.get("/api/top-watchtime", async (req, res) => {
@@ -254,5 +277,5 @@ setInterval(cleanupInactiveViewers, 2 * 60 * 1000);
 app.listen(3000, () => {
   console.log("\n🚀 Gárgolas Backend LIVE ✅");
   console.log(`📺 ${KICK_CHANNEL} - ${POINTS_AMOUNT}pts/30min`);
-  console.log(`✅ Batch fix + Logs ERROR + Top PERMANENTE`);
+  console.log(`✅ Batch fix + Logs ERROR + API STATUS FIX + Top PERMANENTE`);
 });
