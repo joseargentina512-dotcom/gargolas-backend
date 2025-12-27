@@ -1,40 +1,3 @@
-/* ============= YA NO HAY LIMPIEZA AUTOMÁTICA ============= */
-// Los usuarios se mantienen guardados en Firestore permanentemente
-
-/* ============= GUARDAR WATCHTIME CADA 5 MIN ============= */
-async function saveWatchtime() {
-  try {
-    if (viewersMap.size === 0) {
-      console.log('⏱️ No hay usuarios viendo, nada que guardar');
-      return;
-    }
-
-    const batch = db.batch();
-    let saved = 0;
-
-    for (const [username, data] of viewersMap.entries()) {
-      const watchTimeSeconds = Math.floor((Date.now() - data.startTime) / 1000);
-      const userRef = db.collection('watchtime').doc(username);
-      
-      batch.set(userRef, {
-        username,
-        watchTimeSeconds: admin.firestore.FieldValue.increment(watchTimeSeconds),
-        totalWatchTime: admin.firestore.FieldValue.increment(watchTimeSeconds),
-        lastUpdated: new Date(),
-        sessions: admin.firestore.FieldValue.increment(1)
-      }, { merge: true });
-
-      saved++;
-    }
-
-    await batch.commit();
-    console.log(`💾 Watchtime guardado para ${saved} usuarios`);
-
-  } catch (error) {
-    console.error('❌ Error guardando watchtime:', error.message);
-  }
-}
-
 import express from "express";
 import fetch from "node-fetch";
 import crypto from "crypto";
@@ -75,6 +38,40 @@ const sessions = new Map();
 /* ============= TRACKER DE PUNTOS ============= */
 const viewersMap = new Map();
 const WATCHTIME_SAVE_INTERVAL = 5 * 60 * 1000;
+
+/* ============= GUARDAR WATCHTIME CADA 5 MIN ============= */
+async function saveWatchtime() {
+  try {
+    if (viewersMap.size === 0) {
+      console.log('⏱️ No hay usuarios viendo, nada que guardar');
+      return;
+    }
+
+    const batch = db.batch();
+    let saved = 0;
+
+    for (const [username, data] of viewersMap.entries()) {
+      const watchTimeSeconds = Math.floor((Date.now() - data.startTime) / 1000);
+      const userRef = db.collection('watchtime').doc(username);
+      
+      batch.set(userRef, {
+        username,
+        watchTimeSeconds: admin.firestore.FieldValue.increment(watchTimeSeconds),
+        totalWatchTime: admin.firestore.FieldValue.increment(watchTimeSeconds),
+        lastUpdated: new Date(),
+        sessions: admin.firestore.FieldValue.increment(1)
+      }, { merge: true });
+
+      saved++;
+    }
+
+    await batch.commit();
+    console.log(`💾 Watchtime guardado para ${saved} usuarios`);
+
+  } catch (error) {
+    console.error('❌ Error guardando watchtime:', error.message);
+  }
+}
 
 /* ============= VERIFICAR SI STREAM ESTÁ LIVE ============= */
 async function isStreamLive() {
@@ -171,7 +168,7 @@ async function cleanupInactiveViewers() {
   }
 }
 
-/* ============= LOGIN KICK ============= */
+/* ============= LOGIN KICK - ARREGLADO ============= */
 app.get("/auth/kick", (req, res) => {
   try {
     const state = crypto.randomBytes(16).toString("hex");
@@ -203,20 +200,29 @@ app.get("/auth/kick", (req, res) => {
   }
 });
 
-/* ============= CALLBACK ============= */
+/* ============= CALLBACK - FIXEADO STATE ============= */
 app.get("/auth/kick/callback", async (req, res) => {
   const { code, state, error } = req.query;
+
+  console.log("🔍 Callback recibido:", { code: !!code, state, error });
 
   if (error) {
     console.error(`❌ Error de Kick: ${error}`);
     return res.redirect(`${FRONTEND_URL}?error=kick_denied`);
   }
 
-  const verifier = sessions.get(state);
-  if (!code || !verifier) {
-    console.error("❌ Missing code o verifier");
-    return res.redirect(`${FRONTEND_URL}?error=kick_auth`);
+  if (!code) {
+    console.error("❌ No hay código de autorización");
+    return res.redirect(`${FRONTEND_URL}?error=no_code`);
   }
+
+  if (!state || !sessions.has(state)) {
+    console.error("❌ State no encontrado:", state, "Sessions:", Array.from(sessions.keys()));
+    return res.redirect(`${FRONTEND_URL}?error=invalid_state`);
+  }
+
+  const verifier = sessions.get(state);
+  console.log("✅ State válido, verifier encontrado");
 
   try {
     console.log("🔄 Intercambiando código por token...");
@@ -237,6 +243,7 @@ app.get("/auth/kick/callback", async (req, res) => {
     if (!tokenRes.ok) {
       const errorData = await tokenRes.text();
       console.error("❌ Error obteniendo token:", tokenRes.status, errorData);
+      sessions.delete(state);
       return res.redirect(`${FRONTEND_URL}?error=token_error`);
     }
 
@@ -254,6 +261,7 @@ app.get("/auth/kick/callback", async (req, res) => {
     if (!userRes.ok) {
       const errorData = await userRes.text();
       console.error("❌ Error obteniendo usuario:", userRes.status, errorData);
+      sessions.delete(state);
       return res.redirect(`${FRONTEND_URL}?error=user_error`);
     }
 
@@ -287,6 +295,7 @@ app.get("/auth/kick/callback", async (req, res) => {
 
   } catch (error) {
     console.error("❌ Error en callback:", error.message);
+    sessions.delete(state);
     res.redirect(`${FRONTEND_URL}?error=server_error`);
   }
 });
