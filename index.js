@@ -52,19 +52,35 @@ async function deleteSession(state) {
   await db.collection('oauth_sessions').doc(state).delete();
 }
 
-/* ============= FUNCIONES ============= */
+/* ============= FUNCIONES COMPLETAS - CON LOGS DE ERROR ============= */
 async function saveWatchtime() {
-  if (viewersMap.size === 0) return;
-  const batch = db.batch();
-  for (const [username, data] of viewersMap) {
-    const secs = Math.floor((Date.now() - data.startTime) / 1000);
-    batch.set(db.collection('watchtime').doc(username), {
-      username, totalWatchTime: admin.firestore.FieldValue.increment(secs),
-      watchTimeSeconds: admin.firestore.FieldValue.increment(secs), lastUpdated: new Date()
-    }, { merge: true });
+  if (viewersMap.size === 0) {
+    console.log('❌ ERROR: No hay viewers conectados - Skip watchtime');
+    return;
   }
-  await batch.commit();
-  console.log(`💾 Watchtime: ${viewersMap.size} usuarios`);
+
+  try {
+    const batch = db.batch();
+    let operations = 0;
+
+    for (const [username, data] of viewersMap.entries()) {
+      const secs = Math.floor((Date.now() - data.startTime) / 1000);
+      batch.set(db.collection('watchtime').doc(username), {
+        username,
+        totalWatchTime: admin.firestore.FieldValue.increment(secs),
+        watchTimeSeconds: admin.firestore.FieldValue.increment(secs),
+        lastUpdated: new Date()
+      }, { merge: true });
+      operations++;
+    }
+
+    if (operations > 0) {
+      await batch.commit();
+      console.log(`💾 Watchtime OK: ${operations} usuarios`);
+    }
+  } catch (error) {
+    console.error('❌ Error saveWatchtime:', error.message);
+  }
 }
 
 async function isStreamLive() {
@@ -76,19 +92,39 @@ async function isStreamLive() {
 }
 
 async function awardPoints() {
-  if (viewersMap.size === 0 || !await isStreamLive()) return;
-  const batch = db.batch();
-  for (const [username] of viewersMap) {
-    batch.set(db.collection('users').doc(username), {
-      points: admin.firestore.FieldValue.increment(POINTS_AMOUNT),
-      watching: true, lastPointsUpdate: new Date()
-    }, { merge: true });
+  if (viewersMap.size === 0) {
+    console.log('❌ ERROR: No hay viewers conectados - Skip puntos');
+    return;
   }
-  await batch.commit();
-  console.log(`🎯 ${viewersMap.size} usuarios +${POINTS_AMOUNT} pts`);
+  
+  if (!await isStreamLive()) {
+    console.log('❌ ERROR: Stream offline - Skip puntos');
+    return;
+  }
+
+  try {
+    const batch = db.batch();
+    let operations = 0;
+
+    for (const [username] of viewersMap) {
+      batch.set(db.collection('users').doc(username), {
+        points: admin.firestore.FieldValue.increment(POINTS_AMOUNT),
+        watching: true, 
+        lastPointsUpdate: new Date(),
+        totalPointsEarned: admin.firestore.FieldValue.increment(POINTS_AMOUNT)
+      }, { merge: true });
+      operations++;
+    }
+
+    if (operations > 0) {
+      await batch.commit();
+      console.log(`🎯 ${operations} usuarios +${POINTS_AMOUNT} pts`);
+    }
+  } catch (error) {
+    console.error('❌ Error awardPoints:', error.message);
+  }
 }
 
-/* ============= NO BORRA USUARIOS DEL TOP ============= */
 async function cleanupInactiveViewers() {
   const now = Date.now();
   const inactive = [];
@@ -97,10 +133,9 @@ async function cleanupInactiveViewers() {
       inactive.push(username);
     }
   }
-  // ✅ SOLO limpia viewersMap (MEMORIA), NO toca Firestore
   inactive.forEach(username => viewersMap.delete(username));
   if (inactive.length > 0) {
-    console.log(`🧹 Limpiados ${inactive.length} viewers inactivos (solo memoria)`);
+    console.log(`🧹 Limpiados ${inactive.length} viewers (solo memoria)`);
   }
 }
 
@@ -165,15 +200,18 @@ app.get("/auth/kick/callback", async (req, res) => {
 });
 
 /* ============= API RUTAS ============= */
-app.post("/api/start-watching", (req, res) => {
+app.post("/api/start-watching", async (req, res) => {
   const { username } = req.body;
-  viewersMap.set(username, { startTime: Date.now(), lastActivity: Date.now() });
+  if (username) {
+    viewersMap.set(username, { startTime: Date.now(), lastActivity: Date.now() });
+    console.log(`👀 ${username} viendo (${viewersMap.size})`);
+  }
   res.json({ success: true, viewers: viewersMap.size });
 });
 
 app.post("/api/stop-watching", (req, res) => {
   const { username } = req.body;
-  viewersMap.delete(username);
+  if (username) viewersMap.delete(username);
   res.json({ success: true });
 });
 
@@ -214,7 +252,7 @@ setInterval(saveWatchtime, 5 * 60 * 1000);
 setInterval(cleanupInactiveViewers, 2 * 60 * 1000);
 
 app.listen(3000, () => {
-  console.log("\n🚀 Gárgolas Backend LIVE");
+  console.log("\n🚀 Gárgolas Backend LIVE ✅");
   console.log(`📺 ${KICK_CHANNEL} - ${POINTS_AMOUNT}pts/30min`);
-  console.log(`✅ Top watchtime PERMANENTE (no se borran usuarios)`);
+  console.log(`✅ Batch fix + Logs ERROR + Top PERMANENTE`);
 });
