@@ -71,7 +71,7 @@ const sessions = new Map();
 /* ============= TRACKER DE PUNTOS ============= */
 // Map de usuarios viendo: { username: { startTime, lastActivity, sessionId, watchTimeSeconds } }
 const viewersMap = new Map();
-const WATCHTIME_SAVE_INTERVAL = 5 * 60 * 1000; // Guardar cada 5 minutos
+const WATCHTIME_SAVE_INTERVAL = 1 * 60 * 1000; // Guardar cada 5 minutos
 
 /* ============= VERIFICAR SI STREAM ESTÁ LIVE ============= */
 async function isStreamLive() {
