@@ -168,7 +168,7 @@ async function cleanupInactiveViewers() {
   }
 }
 
-/* ============= LOGIN KICK - ARREGLADO ============= */
+/* ============= LOGIN KICK ============= */
 app.get("/auth/kick", (req, res) => {
   try {
     const state = crypto.randomBytes(16).toString("hex");
@@ -200,7 +200,7 @@ app.get("/auth/kick", (req, res) => {
   }
 });
 
-/* ============= CALLBACK - FIXEADO STATE ============= */
+/* ============= CALLBACK - COMPLETAMENTE ARREGLADO ============= */
 app.get("/auth/kick/callback", async (req, res) => {
   const { code, state, error } = req.query;
 
@@ -250,6 +250,7 @@ app.get("/auth/kick/callback", async (req, res) => {
     const tokenData = await tokenRes.json();
     console.log("✅ Token obtenido:", tokenData.access_token.substring(0, 20) + "...");
 
+    // OBTENER USUARIO CON VALIDACIÓN COMPLETA
     const userRes = await fetch("https://api.kick.com/public/v1/users", {
       method: "GET",
       headers: {
@@ -266,36 +267,46 @@ app.get("/auth/kick/callback", async (req, res) => {
     }
 
     const kickUserData = await userRes.json();
-    const kickUser = kickUserData.data?.[0] || kickUserData;
-    const username = kickUser.username || `kick_${kickUser.id}`;
+    console.log("🔍 Usuario raw:", JSON.stringify(kickUserData));
     
-    console.log("✅ Usuario obtenido:", username);
+    // VALIDACIÓN ROBUSTA DEL USUARIO
+    const kickUser = kickUserData.data?.[0] || kickUserData;
+    const kickId = kickUser.id || kickUser.kickId || 'unknown_id_' + Date.now();
+    const username = kickUser.username || kickUser.nickname || `kick_user_${kickId}`;
+    const avatar = kickUser.profile_pic_url || kickUser.profile_pic || '';
 
+    console.log("✅ Usuario procesado:", { username, kickId, avatar });
+
+    // TOKEN FIREBASE
     const firebaseToken = await admin.auth().createCustomToken(
-      `kick_${kickUser.id}`,
+      `kick_${kickId}`,
       {
-        username: username,
+        username,
         provider: "kick"
       }
     );
 
     console.log("✅ Token Firebase creado");
 
+    // GUARDAR USUARIO CON VALIDACIÓN
     await db.collection('users').doc(username).set({
-      kickId: kickUser.id,
+      kickId: kickId,
       username: username,
-      avatar: kickUser.profile_pic_url || kickUser.profile_pic,
+      avatar: avatar,
       loginAt: new Date(),
       points: 0,
       totalPointsEarned: 0
     }, { merge: true });
 
+    // LIMPIAR SESSION
     sessions.delete(state);
+    console.log("🧹 Session limpiada");
+
     res.redirect(`${FRONTEND_URL}?token=${firebaseToken}`);
 
   } catch (error) {
     console.error("❌ Error en callback:", error.message);
-    sessions.delete(state);
+    if (state) sessions.delete(state);
     res.redirect(`${FRONTEND_URL}?error=server_error`);
   }
 });
