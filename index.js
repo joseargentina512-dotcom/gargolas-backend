@@ -1,5 +1,7 @@
 /* ============= YA NO HAY LIMPIEZA AUTOMÁTICA ============= */
-// Los usuarios se mantienen guardados en Firestore permanentemente/* ============= GUARDAR WATCHTIME CADA 5 MIN ============= */
+// Los usuarios se mantienen guardados en Firestore permanentemente
+
+/* ============= GUARDAR WATCHTIME CADA 5 MIN ============= */
 async function saveWatchtime() {
   try {
     if (viewersMap.size === 0) {
@@ -31,7 +33,9 @@ async function saveWatchtime() {
   } catch (error) {
     console.error('❌ Error guardando watchtime:', error.message);
   }
-}import express from "express";
+}
+
+import express from "express";
 import fetch from "node-fetch";
 import crypto from "crypto";
 import cors from "cors";
@@ -71,7 +75,7 @@ const sessions = new Map();
 /* ============= TRACKER DE PUNTOS ============= */
 // Map de usuarios viendo: { username: { startTime, lastActivity, sessionId, watchTimeSeconds } }
 const viewersMap = new Map();
-const WATCHTIME_SAVE_INTERVAL = 1 * 60 * 1000; // Guardar cada 5 minutos
+const WATCHTIME_SAVE_INTERVAL = 5 * 60 * 1000; // Guardar cada 5 minutos
 
 /* ============= VERIFICAR SI STREAM ESTÁ LIVE ============= */
 async function isStreamLive() {
@@ -409,6 +413,29 @@ app.get("/api/top-watchtime", async (req, res) => {
   }
 });
 
+// 🌟 DATOS DE PRUEBA - BORRAR DESPUÉS
+app.get('/api/create-test-data', async (req, res) => {
+  const testUsers = [
+    { username: 'MauroAKD', totalWatchTime: 7200 },
+    { username: 'Gargola1', totalWatchTime: 5400 },
+    { username: 'Gargola2', totalWatchTime: 3600 },
+    { username: 'TestUser', totalWatchTime: 1800 }
+  ];
+  
+  const batch = db.batch();
+  testUsers.forEach(user => {
+    const docRef = db.collection('watchtime').doc(user.username);
+    batch.set(docRef, {
+      username: user.username,
+      totalWatchTime: user.totalWatchTime,
+      watchTimeSeconds: user.totalWatchTime
+    });
+  });
+  
+  await batch.commit();
+  res.json({ success: true, message: '✅ Datos de prueba creados!' });
+});
+
 // Leaderboard (Puntos)
 app.get("/api/leaderboard", async (req, res) => {
   try {
@@ -458,6 +485,9 @@ setInterval(awardPoints, POINTS_INTERVAL);
 
 // Guardar watchtime cada 5 minutos
 setInterval(saveWatchtime, WATCHTIME_SAVE_INTERVAL);
+
+// Limpiar inactivos cada 2 minutos
+setInterval(cleanupInactiveViewers, 2 * 60 * 1000);
 
 // Verificar stream cada 1 minuto
 setInterval(isStreamLive, 60 * 1000);
