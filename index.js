@@ -32,12 +32,52 @@ if (!admin.apps.length) {
 
 const db = admin.firestore();
 
-/* ============= OAUTH STATE MEMORY ============= */
-const sessions = new Map();
-
 /* ============= TRACKER DE PUNTOS ============= */
 const viewersMap = new Map();
 const WATCHTIME_SAVE_INTERVAL = 5 * 60 * 1000;
+
+/* ============= FIRESTORE SESSIONS (PERSISTENTE) ============= */
+async function saveSession(state, verifier) {
+  try {
+    await db.collection('oauth_sessions').doc(state).set({
+      verifier,
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000) // 10 min
+    });
+    console.log("💾 Session guardada en Firestore:", state.substring(0, 8));
+  } catch (error) {
+    console.error('❌ Error saving session:', error);
+  }
+}
+
+async function getSession(state) {
+  try {
+    const now = new Date();
+    const doc = await db.collection('oauth_sessions').doc(state).get();
+    
+    if (!doc.exists) return null;
+    
+    const data = doc.data();
+    if (now > data.expiresAt) {
+      await db.collection('oauth_sessions').doc(state).delete();
+      return null;
+    }
+    
+    return data.verifier;
+  } catch (error) {
+    console.error('❌ Error getting session:', error);
+    return null;
+  }
+}
+
+async function deleteSession(state) {
+  try {
+    await db.collection('oauth_sessions').doc(state).delete();
+    console.log("🧹 Session eliminada:", state.substring(0, 8));
+  } catch (error) {
+    console.error('❌ Error deleting session:', error);
+  }
+}
 
 /* ============= GUARDAR WATCHTIME CADA 5 MIN ============= */
 async function saveWatchtime() {
@@ -168,8 +208,8 @@ async function cleanupInactiveViewers() {
   }
 }
 
-/* ============= LOGIN KICK ============= */
-app.get("/auth/kick", (req, res) => {
+/* ============= LOGIN KICK - FIRESTORE SESSIONS ============= */
+app.get("/auth/kick", async (req, res) => {
   try {
     const state = crypto.randomBytes(16).toString("hex");
     const verifier = crypto.randomBytes(32).toString("hex");
@@ -178,7 +218,8 @@ app.get("/auth/kick", (req, res) => {
       .update(verifier)
       .digest("base64url");
     
-    sessions.set(state, verifier);
+    // 🔥 FIRESTORE SESSION PERSISTENTE
+    await saveSession(state, verifier);
 
     const params = new URLSearchParams({
       client_id: KICK_CLIENT_ID,
@@ -200,7 +241,7 @@ app.get("/auth/kick", (req, res) => {
   }
 });
 
-/* ============= CALLBACK - COMPLETAMENTE ARREGLADO ============= */
+/* ============= CALLBACK - FIRESTORE SESSIONS ============= */
 app.get("/auth/kick/callback", async (req, res) => {
   const { code, state, error } = req.query;
 
@@ -216,13 +257,14 @@ app.get("/auth/kick/callback", async (req, res) => {
     return res.redirect(`${FRONTEND_URL}?error=no_code`);
   }
 
-  if (!state || !sessions.has(state)) {
-    console.error("❌ State no encontrado:", state, "Sessions:", Array.from(sessions.keys()));
+  // 🔥 FIRESTORE SESSION CHECK
+  const verifier = await getSession(state);
+  if (!verifier) {
+    console.error("❌ Session no encontrada en Firestore:", state);
     return res.redirect(`${FRONTEND_URL}?error=invalid_state`);
   }
 
-  const verifier = sessions.get(state);
-  console.log("✅ State válido, verifier encontrado");
+  console.log("✅ Session válida encontrada en Firestore");
 
   try {
     console.log("🔄 Intercambiando código por token...");
@@ -243,14 +285,13 @@ app.get("/auth/kick/callback", async (req, res) => {
     if (!tokenRes.ok) {
       const errorData = await tokenRes.text();
       console.error("❌ Error obteniendo token:", tokenRes.status, errorData);
-      sessions.delete(state);
+      await deleteSession(state);
       return res.redirect(`${FRONTEND_URL}?error=token_error`);
     }
 
     const tokenData = await tokenRes.json();
     console.log("✅ Token obtenido:", tokenData.access_token.substring(0, 20) + "...");
 
-    // OBTENER USUARIO CON VALIDACIÓN COMPLETA
     const userRes = await fetch("https://api.kick.com/public/v1/users", {
       method: "GET",
       headers: {
@@ -262,14 +303,13 @@ app.get("/auth/kick/callback", async (req, res) => {
     if (!userRes.ok) {
       const errorData = await userRes.text();
       console.error("❌ Error obteniendo usuario:", userRes.status, errorData);
-      sessions.delete(state);
+      await deleteSession(state);
       return res.redirect(`${FRONTEND_URL}?error=user_error`);
     }
 
     const kickUserData = await userRes.json();
     console.log("🔍 Usuario raw:", JSON.stringify(kickUserData));
     
-    // VALIDACIÓN ROBUSTA DEL USUARIO
     const kickUser = kickUserData.data?.[0] || kickUserData;
     const kickId = kickUser.id || kickUser.kickId || 'unknown_id_' + Date.now();
     const username = kickUser.username || kickUser.nickname || `kick_user_${kickId}`;
@@ -277,7 +317,6 @@ app.get("/auth/kick/callback", async (req, res) => {
 
     console.log("✅ Usuario procesado:", { username, kickId, avatar });
 
-    // TOKEN FIREBASE
     const firebaseToken = await admin.auth().createCustomToken(
       `kick_${kickId}`,
       {
@@ -288,7 +327,6 @@ app.get("/auth/kick/callback", async (req, res) => {
 
     console.log("✅ Token Firebase creado");
 
-    // GUARDAR USUARIO CON VALIDACIÓN
     await db.collection('users').doc(username).set({
       kickId: kickId,
       username: username,
@@ -298,15 +336,15 @@ app.get("/auth/kick/callback", async (req, res) => {
       totalPointsEarned: 0
     }, { merge: true });
 
-    // LIMPIAR SESSION
-    sessions.delete(state);
-    console.log("🧹 Session limpiada");
+    // 🔥 LIMPIAR FIRESTORE SESSION
+    await deleteSession(state);
+    console.log("🧹 Session Firestore limpiada");
 
     res.redirect(`${FRONTEND_URL}?token=${firebaseToken}`);
 
   } catch (error) {
     console.error("❌ Error en callback:", error.message);
-    if (state) sessions.delete(state);
+    await deleteSession(state);
     res.redirect(`${FRONTEND_URL}?error=server_error`);
   }
 });
@@ -471,5 +509,5 @@ app.listen(3000, () => {
   console.log("\n🚀 Backend OK");
   console.log(`📺 Tracker de puntos para ${KICK_CHANNEL} activado`);
   console.log(`⏰ Puntos: ${POINTS_AMOUNT} cada ${POINTS_INTERVAL / 1000 / 60} minutos`);
-  console.log(`🔗 OAuth: https://id.kick.com\n`);
+  console.log(`🔗 OAuth: https://id.kick.com (Firestore sessions)`);
 });
