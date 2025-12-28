@@ -52,9 +52,9 @@ async function deleteSession(state) {
   await db.collection('oauth_sessions').doc(state).delete();
 }
 
-/* ============= VIEWER TRACKING - DEBUG COMPLETO ============= */
+/* ============= VIEWER TRACKING - MAURO EXCLUIDO ============= */
 app.post("/api/start-watching", async (req, res) => {
-  console.log('📥 POST /start-watching:', req.body); // DEBUG CRÍTICO
+  console.log('📥 POST /start-watching:', req.body);
   
   const { username } = req.body;
   
@@ -63,13 +63,19 @@ app.post("/api/start-watching", async (req, res) => {
     return res.status(400).json({ error: 'Username requerido', viewers: viewersMap.size });
   }
 
+  // ✅ MAUROOAKD NO CUENTA COMO VIEWER (STREAMER)
+  if (username.toLowerCase() === 'maurooakd') {
+    console.log('🚫 MAURO (streamer) excluido de viewers');
+    return res.json({ success: true, viewers: viewersMap.size, excluded: true });
+  }
+
   const oldSize = viewersMap.size;
   viewersMap.set(username, { 
     startTime: Date.now(), 
     lastActivity: Date.now() 
   });
   
-  console.log(`👀 ${username} viendo (${oldSize}→${viewersMap.size}) TOTAL`);
+  console.log(`👀 ${username} viendo (${oldSize}→${viewersMap.size}) TOTAL (SIN MAURO)`);
   res.json({ success: true, viewers: viewersMap.size });
 });
 
@@ -80,26 +86,30 @@ app.post("/api/stop-watching", (req, res) => {
   if (username && viewersMap.has(username)) {
     const oldSize = viewersMap.size;
     viewersMap.delete(username);
-    console.log(`👋 ${username} dejó de ver (${oldSize}→${viewersMap.size})`);
+    console.log(`👋 ${username} dejó de ver (${oldSize}→${viewersMap.size}) (SIN MAURO)`);
   }
   res.json({ success: true, viewers: viewersMap.size });
 });
 
 app.post("/api/user-activity", (req, res) => {
-  console.log('📡 Activity:', req.body.username);
-  
   const { username } = req.body;
   if (viewersMap.has(username)) {
     viewersMap.get(username).lastActivity = Date.now();
-    console.log(`✅ ${username} activo`);
+    console.log(`✅ ${username} activo (SIN MAURO)`);
   }
   res.json({ success: true });
 });
 
-/* ============= FUNCIONES WATCHTIME Y PUNTOS ============= */
+/* ============= WATCHTIME - SOLO CUANDO MAURO LIVE ============= */
 async function saveWatchtime() {
+  const isLive = await isStreamLive();
+  if (!isLive) {
+    console.log('⏱️ NO WATCHTIME: Mauro offline');
+    return;
+  }
+  
   if (viewersMap.size === 0) {
-    console.log('❌ ERROR: No hay viewers conectados - Skip watchtime');
+    console.log('⏱️ No hay viewers, skip watchtime');
     return;
   }
 
@@ -120,21 +130,23 @@ async function saveWatchtime() {
 
     if (operations > 0) {
       await batch.commit();
-      console.log(`💾 Watchtime OK: ${operations} usuarios`);
+      console.log(`💾 Watchtime OK: ${operations} usuarios (MAURO LIVE + SIN MAURO)`);
     }
   } catch (error) {
     console.error('❌ Error saveWatchtime:', error.message);
   }
 }
 
+/* ============= PUNTOS - SOLO CUANDO MAURO LIVE ============= */
 async function awardPoints() {
-  if (viewersMap.size === 0) {
-    console.log('❌ ERROR: No hay viewers conectados - Skip puntos');
+  const isLive = await isStreamLive();
+  if (!isLive) {
+    console.log('❌ NO PUNTOS: Mauro offline');
     return;
   }
   
-  if (!await isStreamLive()) {
-    console.log('❌ ERROR: Stream offline - Skip puntos');
+  if (viewersMap.size === 0) {
+    console.log('❌ NO PUNTOS: No hay viewers');
     return;
   }
 
@@ -154,88 +166,75 @@ async function awardPoints() {
 
     if (operations > 0) {
       await batch.commit();
-      console.log(`🎯 ${operations} usuarios +${POINTS_AMOUNT} pts`);
+      console.log(`🎯 ${operations} usuarios +${POINTS_AMOUNT} pts (MAURO LIVE + SIN MAURO)`);
     }
   } catch (error) {
     console.error('❌ Error awardPoints:', error.message);
   }
 }
 
-/* ============= KICK LIVE STATUS - MÚLTIPLES MÉTODOS ============= */
+/* ============= LIVE DETECCIÓN ============= */
 async function isStreamLive() {
-  // MÉTODO 1: Check viewers en memoria (PRIMERO)
-  if (viewersMap.size > 0) {
-    console.log('✅ LIVE por viewers activos:', viewersMap.size);
-    return true;
-  }
-
-  // MÉTODO 2: Kick API v2
   try {
     const res = await fetch(`https://kick.com/api/v2/channels/${KICK_CHANNEL}`, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://kick.com/',
-        'Accept': 'application/json'
+        'Referer': 'https://kick.com/'
       }
     });
 
-    console.log(`📺 Kick API ${res.status} - ${KICK_CHANNEL}`);
-    
     if (res.ok) {
       const data = await res.json();
-      const live = data.livestream?.is_live || data.is_live || false;
-      console.log('✅ Kick API LIVE:', live, '| Viewers Kick:', data.viewer_count || 0);
+      const live = data.livestream?.is_live === true;
+      console.log(`📺 Mauro ${live ? '🔴 LIVE' : '⚫ OFFLINE'} | Kick viewers: ${data.viewer_count || 0}`);
       return live;
     }
   } catch (error) {
-    console.error('❌ Kick API fail:', error.message);
+    console.log('🔄 Kick API fail');
   }
 
-  // MÉTODO 3: Fallback siempre false si no hay viewers
-  console.log('⚪ Stream offline (no viewers + API fail)');
-  return false;
+  const fallbackLive = viewersMap.size > 2;
+  console.log(`📺 Fallback LIVE: ${fallbackLive} (${viewersMap.size} viewers SIN MAURO)`);
+  return fallbackLive;
 }
 
 async function cleanupInactiveViewers() {
   const now = Date.now();
   const inactive = [];
   for (const [username, data] of viewersMap) {
-    if (now - data.lastActivity > 5 * 60 * 1000) { // 5 min inactivo
+    if (now - data.lastActivity > 10 * 60 * 1000) {
       inactive.push(username);
     }
   }
   inactive.forEach(username => viewersMap.delete(username));
   if (inactive.length > 0) {
-    console.log(`🧹 Limpiados ${inactive.length} viewers inactivos`);
+    console.log(`🧹 Limpiados ${inactive.length} viewers inactivos (SIN MAURO)`);
   }
 }
 
-/* ============= API STATUS - DEBUG MÁXIMO ============= */
+/* ============= API ENDPOINTS ============= */
 app.get("/api/status", async (req, res) => {
   const live = await isStreamLive();
   const viewers = viewersMap.size;
   
-  console.log(`📊 /status → Live: ${live} | Viewers: ${viewers}`);
-  console.log('👥 Viewers list:', Array.from(viewersMap.keys()).slice(0, 10));
+  console.log(`📊 /status → Mauro LIVE: ${live} | Viewers: ${viewers} (SIN MAURO)`);
   
   res.json({ 
     status: "running", 
     viewers, 
     live, 
     channel: KICK_CHANNEL,
-    viewersList: Array.from(viewersMap.keys()), // DEBUG
     timestamp: new Date().toISOString()
   });
 });
 
-/* ============= LEADERBOARDS ============= */
 app.get("/api/top-watchtime", async (req, res) => {
   const snapshot = await db.collection("watchtime")
     .orderBy("totalWatchtime", "desc")
     .limit(10)
     .get();
     
-  const top = snapshot.docs.map((doc, i) => {
+  res.json(snapshot.docs.map((doc, i) => {
     const d = doc.data();
     return {
       position: i + 1,
@@ -244,8 +243,7 @@ app.get("/api/top-watchtime", async (req, res) => {
       minutes: Math.floor(((d.totalWatchtime || 0) % 3600) / 60),
       watching: viewersMap.has(d.username)
     };
-  });
-  res.json(top);
+  }));
 });
 
 app.get("/api/leaderboard", async (req, res) => {
@@ -254,88 +252,66 @@ app.get("/api/leaderboard", async (req, res) => {
     .limit(10)
     .get();
     
-  const top = snapshot.docs.map(doc => ({
+  res.json(snapshot.docs.map(doc => ({
     username: doc.id,
     points: doc.data().points || 0,
     watching: viewersMap.has(doc.id)
-  }));
-  res.json(top);
+  })));
 });
 
-/* ============= RUTAS OAUTH ============= */
+/* ============= OAUTH - SIEMPRE FUNCIONA ============= */
 app.get("/auth/kick", async (req, res) => {
   const state = crypto.randomBytes(16).toString("hex");
   const verifier = crypto.randomBytes(32).toString("hex");
   const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
   
   await saveSession(state, verifier);
-  
-  const params = new URLSearchParams({
-    client_id: KICK_CLIENT_ID, 
-    redirect_uri: REDIRECT_URI,
-    response_type: "code", 
-    scope: "user:read", 
-    state,
-    code_challenge: challenge, 
-    code_challenge_method: "S256"
-  });
-  
-  res.redirect(`https://id.kick.com/oauth/authorize?${params}`);
+  res.redirect(`https://id.kick.com/oauth/authorize?${new URLSearchParams({
+    client_id: KICK_CLIENT_ID, redirect_uri: REDIRECT_URI,
+    response_type: "code", scope: "user:read", state,
+    code_challenge: challenge, code_challenge_method: "S256"
+  })}`);
 });
 
 app.get("/auth/kick/callback", async (req, res) => {
   const { code, state, error } = req.query;
-  if (error || !code || !state) {
-    return res.redirect(`${FRONTEND_URL}?error=auth`);
-  }
+  if (error || !code || !state) return res.redirect(`${FRONTEND_URL}?error=auth`);
 
   const verifier = await getSession(state);
-  if (!verifier) {
-    return res.redirect(`${FRONTEND_URL}?error=state`);
-  }
+  if (!verifier) return res.redirect(`${FRONTEND_URL}?error=state`);
 
   try {
-    const tokenRes = await fetch("https://id.kick.com/oauth/token", {
-      method: "POST", 
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    const tokenData = await fetch("https://id.kick.com/oauth/token", {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
-        client_id: KICK_CLIENT_ID, 
-        client_secret: KICK_CLIENT_SECRET,
-        grant_type: "authorization_code", 
-        code, 
-        redirect_uri: REDIRECT_URI,
+        client_id: KICK_CLIENT_ID, client_secret: KICK_CLIENT_SECRET,
+        grant_type: "authorization_code", code, redirect_uri: REDIRECT_URI,
         code_verifier: verifier
       })
-    });
-    
-    const tokenData = await tokenRes.json();
-    const userRes = await fetch("https://api.kick.com/public/v1/users", {
+    }).then(r => r.json());
+
+    const userData = await fetch("https://api.kick.com/public/v1/users", {
       headers: { "Authorization": `Bearer ${tokenData.access_token}` }
-    });
-    
-    const userData = await userRes.json();
+    }).then(r => r.json());
+
     const user = userData.data?.[0] || userData;
     const username = user.username || `kick_${user.id || Date.now()}`;
     
-    console.log('✅ Usuario Kick creado:', username);
+    console.log('✅ Usuario vinculado:', username);
     
+    await db.collection('users').doc(username).set({
+      kickId: user.id || 'unknown', username, avatar: user.profile_pic_url || '',
+      points: 0, totalPointsEarned: 0, createdAt: new Date()
+    }, { merge: true });
+
     const firebaseToken = await admin.auth().createCustomToken(`kick_${user.id || 'unknown'}`, {
       username, provider: "kick"
     });
-    
-    await db.collection('users').doc(username).set({
-      kickId: user.id || 'unknown', 
-      username, 
-      avatar: user.profile_pic_url || '',
-      points: 0, 
-      totalPointsEarned: 0
-    }, { merge: true });
     
     await deleteSession(state);
     res.redirect(`${FRONTEND_URL}?token=${firebaseToken}`);
   } catch (error) {
     console.error('❌ OAuth error:', error);
-    await deleteSession(state);
     res.redirect(`${FRONTEND_URL}?error=server`);
   }
 });
@@ -347,7 +323,8 @@ setInterval(cleanupInactiveViewers, 2 * 60 * 1000);
 
 app.listen(3000, () => {
   console.log("\n🚀 Gárgolas Backend LIVE ✅");
-  console.log(`📺 ${KICK_CHANNEL} - ${POINTS_AMOUNT}pts/30min`);
-  console.log(`✅ VIEWERS DEBUG + LIVE FIX + Top PERMANENTE`);
-  console.log(`🔍 Logs: /start-watching, /status, viewersMap`);
+  console.log(`📺 ${KICK_CHANNEL}`);
+  console.log(`✅ PUNTOS + WATCHTIME SOLO CUANDO MAURO LIVE`);
+  console.log(`✅ MAUROOAKD EXCLUIDO de viewers/watchtime/puntos`);
+  console.log(`✅ VINCULACIÓN SIEMPRE OK`);
 });
