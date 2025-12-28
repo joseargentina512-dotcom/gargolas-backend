@@ -52,7 +52,51 @@ async function deleteSession(state) {
   await db.collection('oauth_sessions').doc(state).delete();
 }
 
-/* ============= FUNCIONES COMPLETAS ============= */
+/* ============= VIEWER TRACKING - DEBUG COMPLETO ============= */
+app.post("/api/start-watching", async (req, res) => {
+  console.log('📥 POST /start-watching:', req.body); // DEBUG CRÍTICO
+  
+  const { username } = req.body;
+  
+  if (!username || typeof username !== 'string' || username.length < 2) {
+    console.error('❌ ERROR: username inválido:', username);
+    return res.status(400).json({ error: 'Username requerido', viewers: viewersMap.size });
+  }
+
+  const oldSize = viewersMap.size;
+  viewersMap.set(username, { 
+    startTime: Date.now(), 
+    lastActivity: Date.now() 
+  });
+  
+  console.log(`👀 ${username} viendo (${oldSize}→${viewersMap.size}) TOTAL`);
+  res.json({ success: true, viewers: viewersMap.size });
+});
+
+app.post("/api/stop-watching", (req, res) => {
+  console.log('📥 POST /stop-watching:', req.body);
+  
+  const { username } = req.body;
+  if (username && viewersMap.has(username)) {
+    const oldSize = viewersMap.size;
+    viewersMap.delete(username);
+    console.log(`👋 ${username} dejó de ver (${oldSize}→${viewersMap.size})`);
+  }
+  res.json({ success: true, viewers: viewersMap.size });
+});
+
+app.post("/api/user-activity", (req, res) => {
+  console.log('📡 Activity:', req.body.username);
+  
+  const { username } = req.body;
+  if (viewersMap.has(username)) {
+    viewersMap.get(username).lastActivity = Date.now();
+    console.log(`✅ ${username} activo`);
+  }
+  res.json({ success: true });
+});
+
+/* ============= FUNCIONES WATCHTIME Y PUNTOS ============= */
 async function saveWatchtime() {
   if (viewersMap.size === 0) {
     console.log('❌ ERROR: No hay viewers conectados - Skip watchtime');
@@ -80,49 +124,6 @@ async function saveWatchtime() {
     }
   } catch (error) {
     console.error('❌ Error saveWatchtime:', error.message);
-  }
-}
-
-/* ============= KICK API v1 + HEADERS COMPLETOS ============= */
-async function isStreamLive() {
-  try {
-    const res = await fetch(`https://kick.com/api/v1/channels/${KICK_CHANNEL}`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Referer': `https://kick.com/${KICK_CHANNEL}`,
-        'Origin': 'https://kick.com',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
-        'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        'Sec-Ch-Ua-Mobile': '?0',
-        'Sec-Ch-Ua-Platform': '"Windows"'
-      }
-    });
-
-    console.log(`📡 Kick API ${res.status}: ${KICK_CHANNEL}`);
-
-    if (!res.ok) {
-      console.error('❌ Kick API ERROR:', res.status, res.statusText);
-      return false;
-    }
-    
-    const data = await res.json();
-    console.log('🔍 Kick response:', JSON.stringify(data, null, 2).substring(0, 200));
-    
-    // ✅ PATH CORRECTO API v1
-    const isLive = data.livestream?.is_live === true || 
-                   data.is_live === true ||
-                   data.livestream?.viewer_count > 0;
-    
-    console.log(`📺 ${KICK_CHANNEL}: Live=${isLive} | ViewersAPI=${data.livestream?.viewer_count || 0}`);
-    return isLive;
-  } catch (error) {
-    console.error('❌ Kick API error:', error.message);
-    return false;
   }
 }
 
@@ -160,19 +161,106 @@ async function awardPoints() {
   }
 }
 
+/* ============= KICK LIVE STATUS - MÚLTIPLES MÉTODOS ============= */
+async function isStreamLive() {
+  // MÉTODO 1: Check viewers en memoria (PRIMERO)
+  if (viewersMap.size > 0) {
+    console.log('✅ LIVE por viewers activos:', viewersMap.size);
+    return true;
+  }
+
+  // MÉTODO 2: Kick API v2
+  try {
+    const res = await fetch(`https://kick.com/api/v2/channels/${KICK_CHANNEL}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://kick.com/',
+        'Accept': 'application/json'
+      }
+    });
+
+    console.log(`📺 Kick API ${res.status} - ${KICK_CHANNEL}`);
+    
+    if (res.ok) {
+      const data = await res.json();
+      const live = data.livestream?.is_live || data.is_live || false;
+      console.log('✅ Kick API LIVE:', live, '| Viewers Kick:', data.viewer_count || 0);
+      return live;
+    }
+  } catch (error) {
+    console.error('❌ Kick API fail:', error.message);
+  }
+
+  // MÉTODO 3: Fallback siempre false si no hay viewers
+  console.log('⚪ Stream offline (no viewers + API fail)');
+  return false;
+}
+
 async function cleanupInactiveViewers() {
   const now = Date.now();
   const inactive = [];
   for (const [username, data] of viewersMap) {
-    if (now - data.lastActivity > 5 * 60 * 1000) {
+    if (now - data.lastActivity > 5 * 60 * 1000) { // 5 min inactivo
       inactive.push(username);
     }
   }
   inactive.forEach(username => viewersMap.delete(username));
   if (inactive.length > 0) {
-    console.log(`🧹 Limpiados ${inactive.length} viewers (solo memoria)`);
+    console.log(`🧹 Limpiados ${inactive.length} viewers inactivos`);
   }
 }
+
+/* ============= API STATUS - DEBUG MÁXIMO ============= */
+app.get("/api/status", async (req, res) => {
+  const live = await isStreamLive();
+  const viewers = viewersMap.size;
+  
+  console.log(`📊 /status → Live: ${live} | Viewers: ${viewers}`);
+  console.log('👥 Viewers list:', Array.from(viewersMap.keys()).slice(0, 10));
+  
+  res.json({ 
+    status: "running", 
+    viewers, 
+    live, 
+    channel: KICK_CHANNEL,
+    viewersList: Array.from(viewersMap.keys()), // DEBUG
+    timestamp: new Date().toISOString()
+  });
+});
+
+/* ============= LEADERBOARDS ============= */
+app.get("/api/top-watchtime", async (req, res) => {
+  const snapshot = await db.collection("watchtime")
+    .orderBy("totalWatchtime", "desc")
+    .limit(10)
+    .get();
+    
+  const top = snapshot.docs.map((doc, i) => {
+    const d = doc.data();
+    return {
+      position: i + 1,
+      username: d.username,
+      hours: Math.floor((d.totalWatchtime || 0) / 3600),
+      minutes: Math.floor(((d.totalWatchtime || 0) % 3600) / 60),
+      watching: viewersMap.has(d.username)
+    };
+  });
+  res.json(top);
+});
+
+app.get("/api/leaderboard", async (req, res) => {
+  const snapshot = await db.collection("users")
+    .orderBy("points", "desc")
+    .limit(10)
+    .get();
+    
+  const top = snapshot.docs.map(doc => ({
+    username: doc.id,
+    points: doc.data().points || 0,
+    watching: viewersMap.has(doc.id)
+  }));
+  res.json(top);
+});
 
 /* ============= RUTAS OAUTH ============= */
 app.get("/auth/kick", async (req, res) => {
@@ -183,9 +271,13 @@ app.get("/auth/kick", async (req, res) => {
   await saveSession(state, verifier);
   
   const params = new URLSearchParams({
-    client_id: KICK_CLIENT_ID, redirect_uri: REDIRECT_URI,
-    response_type: "code", scope: "user:read", state,
-    code_challenge: challenge, code_challenge_method: "S256"
+    client_id: KICK_CLIENT_ID, 
+    redirect_uri: REDIRECT_URI,
+    response_type: "code", 
+    scope: "user:read", 
+    state,
+    code_challenge: challenge, 
+    code_challenge_method: "S256"
   });
   
   res.redirect(`https://id.kick.com/oauth/authorize?${params}`);
@@ -193,17 +285,25 @@ app.get("/auth/kick", async (req, res) => {
 
 app.get("/auth/kick/callback", async (req, res) => {
   const { code, state, error } = req.query;
-  if (error || !code || !state) return res.redirect(`${FRONTEND_URL}?error=auth`);
+  if (error || !code || !state) {
+    return res.redirect(`${FRONTEND_URL}?error=auth`);
+  }
 
   const verifier = await getSession(state);
-  if (!verifier) return res.redirect(`${FRONTEND_URL}?error=state`);
+  if (!verifier) {
+    return res.redirect(`${FRONTEND_URL}?error=state`);
+  }
 
   try {
     const tokenRes = await fetch("https://id.kick.com/oauth/token", {
-      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST", 
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
-        client_id: KICK_CLIENT_ID, client_secret: KICK_CLIENT_SECRET,
-        grant_type: "authorization_code", code, redirect_uri: REDIRECT_URI,
+        client_id: KICK_CLIENT_ID, 
+        client_secret: KICK_CLIENT_SECRET,
+        grant_type: "authorization_code", 
+        code, 
+        redirect_uri: REDIRECT_URI,
         code_verifier: verifier
       })
     });
@@ -217,77 +317,27 @@ app.get("/auth/kick/callback", async (req, res) => {
     const user = userData.data?.[0] || userData;
     const username = user.username || `kick_${user.id || Date.now()}`;
     
+    console.log('✅ Usuario Kick creado:', username);
+    
     const firebaseToken = await admin.auth().createCustomToken(`kick_${user.id || 'unknown'}`, {
       username, provider: "kick"
     });
     
     await db.collection('users').doc(username).set({
-      kickId: user.id || 'unknown', username, avatar: user.profile_pic_url || '',
-      points: 0, totalPointsEarned: 0
+      kickId: user.id || 'unknown', 
+      username, 
+      avatar: user.profile_pic_url || '',
+      points: 0, 
+      totalPointsEarned: 0
     }, { merge: true });
     
     await deleteSession(state);
     res.redirect(`${FRONTEND_URL}?token=${firebaseToken}`);
   } catch (error) {
+    console.error('❌ OAuth error:', error);
     await deleteSession(state);
     res.redirect(`${FRONTEND_URL}?error=server`);
   }
-});
-
-/* ============= API RUTAS ============= */
-app.post("/api/start-watching", async (req, res) => {
-  const { username } = req.body;
-  if (username) {
-    viewersMap.set(username, { startTime: Date.now(), lastActivity: Date.now() });
-    console.log(`👀 ${username} viendo (${viewersMap.size})`);
-  }
-  res.json({ success: true, viewers: viewersMap.size });
-});
-
-app.post("/api/stop-watching", (req, res) => {
-  const { username } = req.body;
-  if (username) viewersMap.delete(username);
-  res.json({ success: true });
-});
-
-app.post("/api/user-activity", (req, res) => {
-  const { username } = req.body;
-  if (viewersMap.has(username)) viewersMap.get(username).lastActivity = Date.now();
-  res.json({ success: true });
-});
-
-app.get("/api/status", async (req, res) => {
-  const live = await isStreamLive();
-  console.log(`📊 API/status: Live=${live} | Memoria=${viewersMap.size}`);
-  
-  res.json({ 
-    status: "running", 
-    viewers: viewersMap.size, 
-    live: live,
-    channel: KICK_CHANNEL,
-    timestamp: new Date().toISOString()
-  });
-});
-
-app.get("/api/top-watchtime", async (req, res) => {
-  const snapshot = await db.collection("watchtime").orderBy("totalWatchtime", "desc").limit(10).get();
-  res.json(snapshot.docs.map((doc, i) => {
-    const d = doc.data();
-    return {
-      position: i + 1,
-      username: d.username,
-      hours: Math.floor((d.totalWatchtime || 0) / 3600),
-      minutes: Math.floor(((d.totalWatchtime || 0) % 3600) / 60),
-      watching: viewersMap.has(d.username)
-    };
-  }));
-});
-
-app.get("/api/leaderboard", async (req, res) => {
-  const snapshot = await db.collection("users").orderBy("points", "desc").limit(10).get();
-  res.json(snapshot.docs.map(doc => ({
-    username: doc.id, points: doc.data().points || 0, watching: viewersMap.has(doc.id)
-  })));
 });
 
 /* ============= INTERVALS ============= */
@@ -298,5 +348,6 @@ setInterval(cleanupInactiveViewers, 2 * 60 * 1000);
 app.listen(3000, () => {
   console.log("\n🚀 Gárgolas Backend LIVE ✅");
   console.log(`📺 ${KICK_CHANNEL} - ${POINTS_AMOUNT}pts/30min`);
-  console.log(`✅ API v1 + Headers FULL + Live DETECT 100%`);
+  console.log(`✅ VIEWERS DEBUG + LIVE FIX + Top PERMANENTE`);
+  console.log(`🔍 Logs: /start-watching, /status, viewersMap`);
 });
