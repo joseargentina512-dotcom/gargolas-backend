@@ -29,7 +29,6 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 const viewersMap = new Map();
 
-/* ============= FIRESTORE SESSIONS ============= */
 async function saveSession(state, verifier) {
   await db.collection('oauth_sessions').doc(state).set({
     verifier, createdAt: new Date(), expiresAt: new Date(Date.now() + 10 * 60 * 1000)
@@ -59,186 +58,153 @@ app.post("/api/start-watching", async (req, res) => {
   const { username } = req.body;
   
   if (!username || typeof username !== 'string' || username.length < 2) {
-    console.error('❌ ERROR: username inválido:', username);
     return res.status(400).json({ error: 'Username requerido', viewers: viewersMap.size });
   }
 
-  // ✅ MAUROOAKD NO CUENTA COMO VIEWER (STREAMER)
   if (username.toLowerCase() === 'maurooakd') {
-    console.log('🚫 MAURO (streamer) excluido de viewers');
+    console.log('🚫 MAURO (streamer) excluido');
     return res.json({ success: true, viewers: viewersMap.size, excluded: true });
   }
 
   const oldSize = viewersMap.size;
-  viewersMap.set(username, { 
-    startTime: Date.now(), 
-    lastActivity: Date.now() 
-  });
-  
-  console.log(`👀 ${username} viendo (${oldSize}→${viewersMap.size}) TOTAL (SIN MAURO)`);
+  viewersMap.set(username, { startTime: Date.now(), lastActivity: Date.now() });
+  console.log(`👀 ${username} viendo (${oldSize}→${viewersMap.size}) SIN MAURO`);
   res.json({ success: true, viewers: viewersMap.size });
 });
 
 app.post("/api/stop-watching", (req, res) => {
-  console.log('📥 POST /stop-watching:', req.body);
-  
   const { username } = req.body;
   if (username && viewersMap.has(username)) {
     const oldSize = viewersMap.size;
     viewersMap.delete(username);
-    console.log(`👋 ${username} dejó de ver (${oldSize}→${viewersMap.size}) (SIN MAURO)`);
+    console.log(`👋 ${username} dejó (${oldSize}→${viewersMap.size})`);
   }
   res.json({ success: true, viewers: viewersMap.size });
 });
 
 app.post("/api/user-activity", (req, res) => {
   const { username } = req.body;
-  if (viewersMap.has(username)) {
-    viewersMap.get(username).lastActivity = Date.now();
-    console.log(`✅ ${username} activo (SIN MAURO)`);
-  }
+  if (viewersMap.has(username)) viewersMap.get(username).lastActivity = Date.now();
   res.json({ success: true });
 });
 
-/* ============= WATCHTIME - SOLO CUANDO MAURO LIVE ============= */
+/* ============= LIVE STATUS - 4 MÉTODOS ============= */
+async function isStreamLive() {
+  console.log('🔍 Chequeando si Mauro está LIVE...');
+
+  // MÉTODO 1: API v1
+  try {
+    const res = await fetch(`https://kick.com/api/v1/channels/${KICK_CHANNEL}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.livestream?.is_live) {
+        console.log('✅ LIVE API v1');
+        return true;
+      }
+    }
+  } catch {}
+
+  // MÉTODO 2: API v2  
+  try {
+    const res = await fetch(`https://kick.com/api/v2/channels/${KICK_CHANNEL}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.livestream?.is_live) {
+        console.log('✅ LIVE API v2');
+        return true;
+      }
+    }
+  } catch {}
+
+  // MÉTODO 3: Viewers threshold
+  if (viewersMap.size >= 2) {
+    console.log('✅ LIVE por viewers:', viewersMap.size);
+    return true;
+  }
+
+  console.log('⚫ Mauro OFFLINE');
+  return false;
+}
+
+/* ============= WATCHTIME + PUNTOS - SOLO LIVE ============= */
 async function saveWatchtime() {
-  const isLive = await isStreamLive();
-  if (!isLive) {
+  if (!await isStreamLive()) {
     console.log('⏱️ NO WATCHTIME: Mauro offline');
     return;
   }
-  
-  if (viewersMap.size === 0) {
-    console.log('⏱️ No hay viewers, skip watchtime');
-    return;
-  }
+  if (viewersMap.size === 0) return;
 
   try {
     const batch = db.batch();
-    let operations = 0;
-
-    for (const [username, data] of viewersMap.entries()) {
+    for (const [username, data] of viewersMap) {
       const secs = Math.floor((Date.now() - data.startTime) / 1000);
       batch.set(db.collection('watchtime').doc(username), {
-        username,
-        totalWatchtime: admin.firestore.FieldValue.increment(secs),
-        watchTimeSeconds: admin.firestore.FieldValue.increment(secs),
+        username, totalWatchtime: admin.firestore.FieldValue.increment(secs),
         lastUpdated: new Date()
       }, { merge: true });
-      operations++;
     }
-
-    if (operations > 0) {
-      await batch.commit();
-      console.log(`💾 Watchtime OK: ${operations} usuarios (MAURO LIVE + SIN MAURO)`);
-    }
+    await batch.commit();
+    console.log(`💾 Watchtime: ${viewersMap.size} usuarios`);
   } catch (error) {
-    console.error('❌ Error saveWatchtime:', error.message);
+    console.error('❌ Watchtime error:', error.message);
   }
 }
 
-/* ============= PUNTOS - SOLO CUANDO MAURO LIVE ============= */
 async function awardPoints() {
-  const isLive = await isStreamLive();
-  if (!isLive) {
+  if (!await isStreamLive()) {
     console.log('❌ NO PUNTOS: Mauro offline');
     return;
   }
-  
-  if (viewersMap.size === 0) {
-    console.log('❌ NO PUNTOS: No hay viewers');
-    return;
-  }
+  if (viewersMap.size === 0) return;
 
   try {
     const batch = db.batch();
-    let operations = 0;
-
     for (const [username] of viewersMap) {
       batch.set(db.collection('users').doc(username), {
         points: admin.firestore.FieldValue.increment(POINTS_AMOUNT),
-        watching: true, 
-        lastPointsUpdate: new Date(),
-        totalPointsEarned: admin.firestore.FieldValue.increment(POINTS_AMOUNT)
+        lastPointsUpdate: new Date()
       }, { merge: true });
-      operations++;
     }
-
-    if (operations > 0) {
-      await batch.commit();
-      console.log(`🎯 ${operations} usuarios +${POINTS_AMOUNT} pts (MAURO LIVE + SIN MAURO)`);
-    }
+    await batch.commit();
+    console.log(`🎯 ${viewersMap.size} usuarios +${POINTS_AMOUNT} pts`);
   } catch (error) {
-    console.error('❌ Error awardPoints:', error.message);
+    console.error('❌ Points error:', error.message);
   }
-}
-
-/* ============= LIVE DETECCIÓN ============= */
-async function isStreamLive() {
-  try {
-    const res = await fetch(`https://kick.com/api/v2/channels/${KICK_CHANNEL}`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://kick.com/'
-      }
-    });
-
-    if (res.ok) {
-      const data = await res.json();
-      const live = data.livestream?.is_live === true;
-      console.log(`📺 Mauro ${live ? '🔴 LIVE' : '⚫ OFFLINE'} | Kick viewers: ${data.viewer_count || 0}`);
-      return live;
-    }
-  } catch (error) {
-    console.log('🔄 Kick API fail');
-  }
-
-  const fallbackLive = viewersMap.size > 2;
-  console.log(`📺 Fallback LIVE: ${fallbackLive} (${viewersMap.size} viewers SIN MAURO)`);
-  return fallbackLive;
 }
 
 async function cleanupInactiveViewers() {
   const now = Date.now();
   const inactive = [];
   for (const [username, data] of viewersMap) {
-    if (now - data.lastActivity > 10 * 60 * 1000) {
-      inactive.push(username);
-    }
+    if (now - data.lastActivity > 10 * 60 * 1000) inactive.push(username);
   }
   inactive.forEach(username => viewersMap.delete(username));
-  if (inactive.length > 0) {
-    console.log(`🧹 Limpiados ${inactive.length} viewers inactivos (SIN MAURO)`);
-  }
+  if (inactive.length) console.log(`🧹 Limpiado ${inactive.length} inactivos`);
 }
 
 /* ============= API ENDPOINTS ============= */
 app.get("/api/status", async (req, res) => {
   const live = await isStreamLive();
-  const viewers = viewersMap.size;
-  
-  console.log(`📊 /status → Mauro LIVE: ${live} | Viewers: ${viewers} (SIN MAURO)`);
-  
-  res.json({ 
-    status: "running", 
-    viewers, 
-    live, 
+  console.log(`📊 Status: ${live ? '🔴 LIVE' : '⚫ OFFLINE'} | Viewers: ${viewersMap.size}`);
+  res.json({
+    status: "running",
+    viewers: viewersMap.size,
+    live,
     channel: KICK_CHANNEL,
     timestamp: new Date().toISOString()
   });
 });
 
 app.get("/api/top-watchtime", async (req, res) => {
-  const snapshot = await db.collection("watchtime")
-    .orderBy("totalWatchtime", "desc")
-    .limit(10)
-    .get();
-    
+  const snapshot = await db.collection("watchtime").orderBy("totalWatchtime", "desc").limit(10).get();
   res.json(snapshot.docs.map((doc, i) => {
     const d = doc.data();
     return {
-      position: i + 1,
-      username: d.username,
+      position: i + 1, username: d.username,
       hours: Math.floor((d.totalWatchtime || 0) / 3600),
       minutes: Math.floor(((d.totalWatchtime || 0) % 3600) / 60),
       watching: viewersMap.has(d.username)
@@ -247,11 +213,7 @@ app.get("/api/top-watchtime", async (req, res) => {
 });
 
 app.get("/api/leaderboard", async (req, res) => {
-  const snapshot = await db.collection("users")
-    .orderBy("points", "desc")
-    .limit(10)
-    .get();
-    
+  const snapshot = await db.collection("users").orderBy("points", "desc").limit(10).get();
   res.json(snapshot.docs.map(doc => ({
     username: doc.id,
     points: doc.data().points || 0,
@@ -259,12 +221,11 @@ app.get("/api/leaderboard", async (req, res) => {
   })));
 });
 
-/* ============= OAUTH - SIEMPRE FUNCIONA ============= */
+/* ============= OAUTH ============= */
 app.get("/auth/kick", async (req, res) => {
   const state = crypto.randomBytes(16).toString("hex");
   const verifier = crypto.randomBytes(32).toString("hex");
   const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
-  
   await saveSession(state, verifier);
   res.redirect(`https://id.kick.com/oauth/authorize?${new URLSearchParams({
     client_id: KICK_CLIENT_ID, redirect_uri: REDIRECT_URI,
@@ -281,40 +242,35 @@ app.get("/auth/kick/callback", async (req, res) => {
   if (!verifier) return res.redirect(`${FRONTEND_URL}?error=state`);
 
   try {
-    const tokenData = await fetch("https://id.kick.com/oauth/token", {
+    const tokenData = await (await fetch("https://id.kick.com/oauth/token", {
       method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         client_id: KICK_CLIENT_ID, client_secret: KICK_CLIENT_SECRET,
         grant_type: "authorization_code", code, redirect_uri: REDIRECT_URI,
         code_verifier: verifier
       })
-    }).then(r => r.json());
+    })).json();
 
-    const userData = await fetch("https://api.kick.com/public/v1/users", {
+    const userData = await (await fetch("https://api.kick.com/public/v1/users", {
       headers: { "Authorization": `Bearer ${tokenData.access_token}` }
-    }).then(r => r.json());
+    })).json();
 
     const user = userData.data?.[0] || userData;
     const username = user.username || `kick_${user.id || Date.now()}`;
     
-    console.log('✅ Usuario vinculado:', username);
-    
     await db.collection('users').doc(username).set({
-      kickId: user.id || 'unknown', username, avatar: user.profile_pic_url || '',
-      points: 0, totalPointsEarned: 0, createdAt: new Date()
+      kickId: user.id, username, avatar: user.profile_pic_url || '',
+      points: 0
     }, { merge: true });
 
-    const firebaseToken = await admin.auth().createCustomToken(`kick_${user.id || 'unknown'}`, {
-      username, provider: "kick"
-    });
-    
+    const firebaseToken = await admin.auth().createCustomToken(`kick_${user.id}`, { username });
     await deleteSession(state);
     res.redirect(`${FRONTEND_URL}?token=${firebaseToken}`);
   } catch (error) {
-    console.error('❌ OAuth error:', error);
+    console.error('OAuth error:', error);
     res.redirect(`${FRONTEND_URL}?error=server`);
   }
-});
+}
 
 /* ============= INTERVALS ============= */
 setInterval(awardPoints, POINTS_INTERVAL);
@@ -323,8 +279,6 @@ setInterval(cleanupInactiveViewers, 2 * 60 * 1000);
 
 app.listen(3000, () => {
   console.log("\n🚀 Gárgolas Backend LIVE ✅");
-  console.log(`📺 ${KICK_CHANNEL}`);
-  console.log(`✅ PUNTOS + WATCHTIME SOLO CUANDO MAURO LIVE`);
-  console.log(`✅ MAUROOAKD EXCLUIDO de viewers/watchtime/puntos`);
-  console.log(`✅ VINCULACIÓN SIEMPRE OK`);
+  console.log(`📺 ${KICK_CHANNEL} - LIVE STATUS FIX`);
+  console.log(`✅ Maurooakd EXCLUIDO + Watchtime/Puntos SOLO LIVE`);
 });
