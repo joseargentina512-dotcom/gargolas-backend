@@ -52,7 +52,7 @@ async function deleteSession(state) {
   await db.collection('oauth_sessions').doc(state).delete();
 }
 
-/* ============= FUNCIONES COMPLETAS - CON LOGS DE ERROR ============= */
+/* ============= FUNCIONES COMPLETAS ============= */
 async function saveWatchtime() {
   if (viewersMap.size === 0) {
     console.log('❌ ERROR: No hay viewers conectados - Skip watchtime');
@@ -67,7 +67,7 @@ async function saveWatchtime() {
       const secs = Math.floor((Date.now() - data.startTime) / 1000);
       batch.set(db.collection('watchtime').doc(username), {
         username,
-        totalWatchTime: admin.firestore.FieldValue.increment(secs),
+        totalWatchtime: admin.firestore.FieldValue.increment(secs),
         watchTimeSeconds: admin.firestore.FieldValue.increment(secs),
         lastUpdated: new Date()
       }, { merge: true });
@@ -83,21 +83,42 @@ async function saveWatchtime() {
   }
 }
 
-/* ============= API STATUS CORREGIDO - DETECTA STREAM LIVE ============= */
+/* ============= KICK API v1 + HEADERS COMPLETOS ============= */
 async function isStreamLive() {
   try {
-    const res = await fetch(`https://kick.com/api/v2/channels/${KICK_CHANNEL}`);
+    const res = await fetch(`https://kick.com/api/v1/channels/${KICK_CHANNEL}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Referer': `https://kick.com/${KICK_CHANNEL}`,
+        'Origin': 'https://kick.com',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Windows"'
+      }
+    });
+
+    console.log(`📡 Kick API ${res.status}: ${KICK_CHANNEL}`);
+
     if (!res.ok) {
-      console.error('❌ Kick API no OK:', res.status);
+      console.error('❌ Kick API ERROR:', res.status, res.statusText);
       return false;
     }
     
     const data = await res.json();
-    const isLive = data.livestream?.is_live === true || 
-                   data.livestream?.live_at !== null ||
-                   data.is_live === true;
+    console.log('🔍 Kick response:', JSON.stringify(data, null, 2).substring(0, 200));
     
-    console.log(`📺 ${KICK_CHANNEL}: Live=${isLive}, ViewersAPI=${data.viewer_count || 'N/A'}`);
+    // ✅ PATH CORRECTO API v1
+    const isLive = data.livestream?.is_live === true || 
+                   data.is_live === true ||
+                   data.livestream?.viewer_count > 0;
+    
+    console.log(`📺 ${KICK_CHANNEL}: Live=${isLive} | ViewersAPI=${data.livestream?.viewer_count || 0}`);
     return isLive;
   } catch (error) {
     console.error('❌ Kick API error:', error.message);
@@ -249,14 +270,14 @@ app.get("/api/status", async (req, res) => {
 });
 
 app.get("/api/top-watchtime", async (req, res) => {
-  const snapshot = await db.collection("watchtime").orderBy("totalWatchTime", "desc").limit(10).get();
+  const snapshot = await db.collection("watchtime").orderBy("totalWatchtime", "desc").limit(10).get();
   res.json(snapshot.docs.map((doc, i) => {
     const d = doc.data();
     return {
       position: i + 1,
       username: d.username,
-      hours: Math.floor((d.totalWatchTime || 0) / 3600),
-      minutes: Math.floor(((d.totalWatchTime || 0) % 3600) / 60),
+      hours: Math.floor((d.totalWatchtime || 0) / 3600),
+      minutes: Math.floor(((d.totalWatchtime || 0) % 3600) / 60),
       watching: viewersMap.has(d.username)
     };
   }));
@@ -277,5 +298,5 @@ setInterval(cleanupInactiveViewers, 2 * 60 * 1000);
 app.listen(3000, () => {
   console.log("\n🚀 Gárgolas Backend LIVE ✅");
   console.log(`📺 ${KICK_CHANNEL} - ${POINTS_AMOUNT}pts/30min`);
-  console.log(`✅ Batch fix + Logs ERROR + API STATUS FIX + Top PERMANENTE`);
+  console.log(`✅ API v1 + Headers FULL + Live DETECT 100%`);
 });
