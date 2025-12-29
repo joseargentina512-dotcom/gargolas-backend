@@ -5,7 +5,16 @@ import cors from "cors";
 import admin from "firebase-admin";
 
 const app = express();
-app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
+
+// ✅ CORS FIX - SIMPLE Y FUNCIONAL
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
+
 app.use(express.json({ limit: '10mb' }));
 
 const {
@@ -34,7 +43,6 @@ if (!admin.apps.length && FIREBASE_SERVICE_ACCOUNT) {
 const db = admin.firestore();
 const viewersMap = new Map();
 
-// SESSION MANAGEMENT
 async function saveSession(state, verifier) {
   await db.collection('oauth_sessions').doc(state).set({
     verifier, createdAt: new Date(), expiresAt: new Date(Date.now() + 10 * 60 * 1000)
@@ -52,7 +60,6 @@ async function getSession(state) {
     }
     return data.verifier;
   } catch (error) {
-    console.error("Session error:", error);
     return null;
   }
 }
@@ -60,12 +67,9 @@ async function getSession(state) {
 async function deleteSession(state) {
   try {
     await db.collection('oauth_sessions').doc(state).delete();
-  } catch (error) {
-    console.error("Delete session error:", error);
-  }
+  } catch (error) {}
 }
 
-// ✅ KICK API CORREGIDA
 async function isStreamLive() {
   try {
     const response = await nodeFetch(`https://ingest.kick.com/api/v1/channels/${KICK_CHANNEL}`, {
@@ -87,7 +91,6 @@ async function isStreamLive() {
   }
 }
 
-// VIEWER ENDPOINTS
 app.post("/api/start-watching", async (req, res) => {
   const { username } = req.body;
   
@@ -117,7 +120,6 @@ app.post("/api/user-activity", (req, res) => {
   res.json({ success: true });
 });
 
-// STATUS API
 app.get("/api/status", async (req, res) => {
   const status = await isStreamLive();
   res.json({
@@ -128,7 +130,6 @@ app.get("/api/status", async (req, res) => {
   });
 });
 
-// LEADERBOARDS
 app.get("/api/top-watchtime", async (req, res) => {
   try {
     const snapshot = await db.collection("watchtime")
@@ -168,7 +169,6 @@ app.get("/api/leaderboard", async (req, res) => {
   }
 });
 
-// OAUTH KICK - CORREGIDO
 app.get("/auth/kick", async (req, res) => {
   if (!KICK_CLIENT_ID) {
     return res.redirect(`${FRONTEND_URL}?error=no_client_id`);
@@ -206,7 +206,6 @@ app.get("/auth/kick/callback", async (req, res) => {
   }
 
   try {
-    // ✅ FIX: body como string
     const tokenRes = await nodeFetch("https://id.kick.com/oauth/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -234,7 +233,6 @@ app.get("/auth/kick/callback", async (req, res) => {
     const user = userData.data?.[0] || userData;
     const username = user.username || `kick_${user.id}`;
     
-    // Save user
     await db.collection('users').doc(username).set({
       kickId: user.id,
       username,
@@ -259,14 +257,6 @@ app.get("/auth/kick/callback", async (req, res) => {
 });
 
 // INTERVALS
-setInterval(async () => {
-  const status = await isStreamLive();
-  if (status.live && viewersMap.size > 0) {
-    console.log(`🎯 Awarding points to ${viewersMap.size} viewers`);
-    // Points logic aquí (simplificado)
-  }
-}, POINTS_INTERVAL);
-
 setInterval(() => {
   const now = Date.now();
   for (const [username, data] of viewersMap) {
@@ -278,6 +268,7 @@ setInterval(() => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Backend en puerto ${PORT}`);
+  console.log(`🚀 Gárgolas Backend LIVE en puerto ${PORT} ✅`);
   console.log(`📺 Monitoreando ${KICK_CHANNEL}`);
+  console.log(`🔗 Auth: ${REDIRECT_URI}`);
 });
