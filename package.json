@@ -2,11 +2,11 @@
   "name": "gargolas-backend",
   "version": "1.0.0",
   "description": "Backend Gárgolas Community - MauroAKD",
-  "main": "server.js",
+  "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node index.js",
+    "dev": "node index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
