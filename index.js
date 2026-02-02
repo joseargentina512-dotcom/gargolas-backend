@@ -23,15 +23,18 @@ const {
 const REDIRECT_URI="https://gargolas-backend.onrender.com/auth/kick/callback";
 const KICK_CHANNEL="maurooakd";
 
+// 🔥 INICIALIZAR FIREBASE
 if(!admin.apps.length){
   admin.initializeApp({
     credential: admin.credential.cert(JSON.parse(FIREBASE_SERVICE_ACCOUNT))
   });
+  console.log("Firebase inicializado correctamente");
 }
 
 const db = admin.firestore();
 const viewersMap = new Map();
 
+// ================= STREAM STATUS =================
 async function isStreamLive(){
   try{
     const r = await nodeFetch(`https://kick.com/api/v2/channels/${KICK_CHANNEL}`);
@@ -42,11 +45,17 @@ async function isStreamLive(){
   }
 }
 
+// ================= WATCHING =================
+
 app.post("/api/start-watching",(req,res)=>{
   const {username} = req.body;
+  if (!username) return res.json({success:false});
+
   viewersMap.set(username,{last:Date.now()});
   res.json({success:true});
 });
+
+// ================= REDEEM =================
 
 app.post("/api/redeem", async (req,res)=>{
   const {username,item,price} = req.body;
@@ -75,6 +84,8 @@ app.post("/api/redeem", async (req,res)=>{
   res.json({success:true,alert});
 });
 
+// ================= !PRESENTE =================
+
 app.post("/api/presente", async (req,res)=>{
   const {username} = req.body;
 
@@ -100,6 +111,8 @@ app.post("/api/presente", async (req,res)=>{
   res.json({success:true,streak,bonusPoints:bonus});
 });
 
+// ================= LEADERBOARD =================
+
 app.get("/api/leaderboard", async (req,res)=>{
   const snap = await db.collection("users")
     .orderBy("points","desc")
@@ -111,6 +124,8 @@ app.get("/api/leaderboard", async (req,res)=>{
     points:d.data().points || 0
   })));
 });
+
+// ================= OAUTH KICK =================
 
 app.get("/auth/kick",(req,res)=>{
   const state = crypto.randomBytes(16).toString("hex");
@@ -126,50 +141,72 @@ app.get("/auth/kick",(req,res)=>{
   res.redirect(`https://id.kick.com/oauth/authorize?${params}`);
 });
 
+// 🔥 CALLBACK CORREGIDO
 app.get("/auth/kick/callback", async (req,res)=>{
-  const {code} = req.query;
+  try {
+    const {code} = req.query;
 
-  const t = await nodeFetch("https://id.kick.com/oauth/token",{
-    method:"POST",
-    headers:{"Content-Type":"application/x-www-form-urlencoded"},
-    body:new URLSearchParams({
-      client_id:KICK_CLIENT_ID,
-      client_secret:KICK_CLIENT_SECRET,
-      grant_type:"authorization_code",
-      code,
-      redirect_uri:REDIRECT_URI
-    })
-  });
-
-  const tokenData = await t.json();
-
-  const u = await nodeFetch("https://api.kick.com/api/v1/users",{
-    headers:{Authorization:`Bearer ${tokenData.access_token}`}
-  });
-
-  const user = await u.json();
-  const username = user.username;
-
-  const uid = `kick_${user.id}`;
-
-  try{
-    await admin.auth().getUser(uid);
-  }catch{
-    await admin.auth().createUser({
-      uid,
-      displayName:username
+    const t = await nodeFetch("https://id.kick.com/oauth/token",{
+      method:"POST",
+      headers:{"Content-Type":"application/x-www-form-urlencoded"},
+      body:new URLSearchParams({
+        client_id:KICK_CLIENT_ID,
+        client_secret:KICK_CLIENT_SECRET,
+        grant_type:"authorization_code",
+        code,
+        redirect_uri:REDIRECT_URI
+      })
     });
+
+    const tokenData = await t.json();
+
+    const u = await nodeFetch("https://api.kick.com/api/v1/users",{
+      headers:{Authorization:`Bearer ${tokenData.access_token}`}
+    });
+
+    const userData = await u.json();
+
+    // 🔴 CORRECCIÓN CLAVE
+    const user = userData.data?.[0];
+
+    if (!user) {
+      return res.redirect(`${FRONTEND_URL}?error=no_user`);
+    }
+
+    const username = user.username;
+    const uid = `kick_${user.id}`;
+
+    console.log("Usuario autenticado:", username);
+
+    // CREAR USUARIO EN AUTH SI NO EXISTE
+    try{
+      await admin.auth().getUser(uid);
+    }catch{
+      await admin.auth().createUser({
+        uid,
+        displayName: username
+      });
+    }
+
+    // CREAR USUARIO EN FIRESTORE
+    await db.collection("users").doc(username).set({
+      points:0,
+      streak:0,
+      createdAt: new Date()
+    },{merge:true});
+
+    // GENERAR TOKEN PARA FRONTEND
+    const firebaseToken = await admin.auth().createCustomToken(uid);
+
+    res.redirect(`${FRONTEND_URL}?token=${firebaseToken}`);
+
+  } catch (err) {
+    console.error("Error OAuth:", err);
+    res.redirect(`${FRONTEND_URL}?error=oauth_failed`);
   }
-
-  await db.collection("users").doc(username).set({
-    points:0,
-    streak:0
-  },{merge:true});
-
-  const firebaseToken = await admin.auth().createCustomToken(uid);
-
-  res.redirect(`${FRONTEND_URL}?token=${firebaseToken}`);
 });
+
+// ================= ENTREGA DE PUNTOS =================
 
 setInterval(async ()=>{
   if(!(await isStreamLive())) return;
@@ -183,6 +220,8 @@ setInterval(async ()=>{
   console.log("Puntos entregados a viewers activos");
 
 },30*60*1000);
+
+// ================= INICIAR SERVER =================
 
 app.listen(process.env.PORT || 3000,()=>{
   console.log("Backend Gárgolas Online");
